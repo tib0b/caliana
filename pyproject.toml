@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caliana"
+description = "Analysis of plant calcium imaging data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dynamic = ["version"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "tifffile",
+    "pystackreg",          # whole-frame / per-leaf rigid registration (SPEC §3 Stage II)
+]
+
+[project.optional-dependencies]
+# Stage I .nd2 loading (lazy, dask-backed; xarray gives named dims)
+nd2 = ["nd2", "dask", "xarray"]
+# GUI widgets (notebook + app). qtpy abstracts the Qt binding; pick one binding.
+gui = ["qtpy", "pyqtgraph", "PySide6"]
+# Onset / change-point analyses (caliana/analysis.py)
+analysis = ["ruptures", "scikit-image"]
+# Publication-grade static figures (matplotlib) — see caliana/figures.py
+figures = ["matplotlib"]
+dev = ["pytest"]
+# Everything
+all = ["nd2", "dask", "xarray", "qtpy", "pyqtgraph", "PySide6", "ruptures", "scikit-image", "matplotlib"]
+
+[project.scripts]
+caliana = "caliana.app:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "caliana.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["caliana*"]

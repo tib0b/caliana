@@ -1,0 +1,82 @@
+# Caliana
+
+Analysis of plant calcium imaging data — load a recording, stabilize leaf
+movement, place ROIs, extract fluorescence traces, compute ΔF/F, and run
+response/propagation analyses with reproducible export. Usable as a headless
+library, from a Jupyter notebook, or via embeddable PyQt widgets.
+
+See [`docs/SPEC.md`](docs/SPEC.md) for the full specification.
+
+## Install
+
+```bash
+pip install -e .            # core (numpy, scipy, tifffile, pystackreg)
+pip install -e '.[all]'     # + nd2 loading, GUI widgets, analysis & figure extras
+pip install -e '.[gui]'     # just the PyQt/pyqtgraph widget stack
+pip install -e '.[dev]'     # + pytest
+```
+
+Optional-dependency groups: `nd2`, `gui`, `analysis`, `figures`, `dev`, `all`.
+
+## Quickstart
+
+```python
+import caliana
+
+s = caliana.Session.from_file("movie.tif", temporal_step=2)   # load + downsample
+s.register(caliana.RegistrationMode.WHOLE_FRAME, reference="mean")
+s.add_roi(center=(32, 32), size=4, label="centre")
+s.extract_traces()
+s.compute_dff(n=12)
+res = s.cross_roi_propagation(signal="dff")     # speed, direction, source ROI
+s.export_traces("traces.csv")
+s.export_provenance("provenance.json")
+```
+
+Interactive (after `%gui qt` in a notebook): `s.preview()` (Stage I),
+`s.select_rois()` (Stage II), `s.analyze()` (Stage III). Each reads and writes the
+same `Session`, so widgets and API calls mix freely.
+[`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks the full headless
+workflow end-to-end with rendered plots.
+
+## Package layout
+
+| Module (`src/caliana/`) | Responsibility (SPEC ref) |
+| --- | --- |
+| `models.py` | Core dataclasses/enums: `Session` state pieces (§2.1) |
+| `timeline.py` | Time axis (frames now; seconds later for electrodes) + events (§3, §6) |
+| `io.py` | Load TIFF/nd2 + downsample-on-load (§3 Stage I) |
+| `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
+| `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
+| `analysis.py` | ΔF/F, peak detection, propagation, custom callables (§3 Stage III) |
+| `export.py` | Traces CSV, stack TIFF, provenance JSON (§4) |
+| `session.py` | `Session`: single source of truth tying it together (§2.1) |
+| `widgets/` | Embeddable PyQt widgets + notebook blocking wrappers (§2.2) |
+| `app.py` | Standalone app entry point (Phase 2) |
+
+## Status
+
+All workflow stages are implemented (no `NotImplementedError` stubs remain):
+whole-frame and per-leaf rigid registration (pystackreg), all three pyqtgraph
+widgets (preview / ROI / analysis), cross-ROI propagation (onset timing + plane
+fit → speed, direction, source), and lazy multi-GB `.nd2` reading. The headless
+spine — load → downsample → ROI → trace → ΔF/F → peaks → export — runs.
+
+> `find_peaks`-based peak detection suits transient/oscillatory signals.
+> Step-like sustained responses have no interior peak — use onset timing
+> (propagation) for those.
+
+## Tests
+
+```bash
+pip install -e '.[dev,all]'
+pytest
+```
+
+The nd2 test ([`tests/test_io.py`](tests/test_io.py)) auto-skips unless the `nd2`
+extra is installed and a real `.nd2` file is present. GUI tests run headless with
+`QT_QPA_PLATFORM=offscreen`.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
