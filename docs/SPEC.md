@@ -19,9 +19,7 @@ central **`Session`** object. Every widget can be:
 ### Phasing
 
 - **Phase 1 (lab/notebook tool):** the `Session` API, the widgets, and the
-  notebook wrappers. Primary users are the author and lab colleagues who are
-  comfortable with Python/Jupyter. Priority: scientific correctness and a
-  flexible API.
+  notebook wrappers. Highly customizable, fits well into existing workflows.
 - **Phase 2 (standalone app):** a self-sufficient PyQt application wrapping the
   same widgets, with installer-grade packaging, robust error handling, and UX
   for non-coders. Items below tagged **[Phase 2]** are deferred.
@@ -91,7 +89,8 @@ wrapper or the app shell.
 **Behavior**
 - Read the selected/cropped/downsampled data into a numpy array `[T, Y, X]`,
   stored in `Session.data`.
-- **Units:** work in **pixels and frame indices only** — no physical calibration
+- **Units:** size is always in pixel, indices are in seconds if a time scale is specified, and falls
+  back to frames otherwise.
   (µm/pixel, seconds) is required or used. Propagation is reported in px/frame,
   timing in frames.
 
@@ -192,8 +191,6 @@ Analyses operate on the ROI traces (and may reference `Session.data`).
   - **Mean of the first N frames** (N user-specified), or
   - **User-selected baseline region**: the user drags a time window on the trace
     to define the baseline interval interactively.
-- **Non-goals (rely on custom callables instead):** photobleaching/detrending
-  correction; background subtraction.
 
 **Built-in analyses**
 - **Peak detection** per trace: amplitude, time-to-peak (frames), peak count

@@ -25,6 +25,7 @@ import pyqtgraph as pg
 from ..models import RegistrationMode, ROIShape
 from ..registration import _rigid_to_matrix
 from ..roi import polygon_centroid
+from ._plot import FrameTimeAxis
 from ._qt import get_qt
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -116,7 +117,9 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self.image.ui.histogram.gradient.hide()
         split.addWidget(self.image)
 
-        self.trace_plot = pg.PlotWidget(title="ROI traces (live)")
+        self._time_axis = FrameTimeAxis(orientation="bottom")
+        self.trace_plot = pg.PlotWidget(title="ROI traces (live)",
+                                        axisItems={"bottom": self._time_axis})
         self.trace_plot.setLabel("bottom", "frame")
         self.trace_plot.setLabel("left", "ΔF/F₀")
         self.trace_plot.addLegend()
@@ -441,6 +444,17 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self._leaf_records.append({"model": leaf, "item": item, "text": text})
 
     # ------------------------------------------------------------- traces
+    def _sync_time_axis(self):
+        """Label the live-trace x-axis in seconds when the Timeline is calibrated.
+
+        Read-only here: ROIs are placed in Stage II, so the frame interval is set
+        elsewhere (notebook or analysis widget); this just reflects it. SPEC §3.
+        """
+        tl = self.session.timeline
+        interval = tl.frame_interval if tl is not None else None
+        self._time_axis.set_frame_interval(interval)
+        self.trace_plot.setLabel("bottom", "time (s)" if interval else "frame")
+
     def _refresh_traces(self):
         """Live preview: redraw every ROI as ΔF/F0 with F0 = the first frame.
 
@@ -449,6 +463,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         traces remain raw mean intensity (SPEC §3).
         """
         self.trace_plot.clear()
+        self._sync_time_axis()
         if not self.session.rois:
             return
         traces = self.session.extract_traces()

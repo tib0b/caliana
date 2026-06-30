@@ -54,18 +54,6 @@ workflow end-to-end with rendered plots.
 | `widgets/` | Embeddable PyQt widgets + notebook blocking wrappers (§2.2) |
 | `app.py` | Standalone app entry point (Phase 2) |
 
-## Status
-
-All workflow stages are implemented (no `NotImplementedError` stubs remain):
-whole-frame and per-leaf rigid registration (pystackreg), all three pyqtgraph
-widgets (preview / ROI / analysis), cross-ROI propagation (onset timing + plane
-fit → speed, direction, source), and lazy multi-GB `.nd2` reading. The headless
-spine — load → downsample → ROI → trace → ΔF/F → peaks → export — runs.
-
-> `find_peaks`-based peak detection suits transient/oscillatory signals.
-> Step-like sustained responses have no interior peak — use onset timing
-> (propagation) for those.
-
 ## Tests
 
 ```bash

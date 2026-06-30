@@ -149,6 +149,17 @@ class Session:
         return self.traces
 
     # --------------------------------------------------------------- Stage III
+    def set_frame_interval(self, seconds_per_frame: Optional[float]) -> "Session":
+        """Calibrate the time axis (seconds per frame); None ⇒ frames-only.
+
+        Once set, the analysis plot, CSV export and static figures report
+        seconds instead of frames. SPEC §3 (Timeline) / §6 (electrode co-analysis).
+        """
+        if self.timeline is None:
+            raise RuntimeError("No data loaded; call load()/from_file() first.")
+        self.timeline.frame_interval = seconds_per_frame
+        return self
+
     def compute_dff(self, method=BaselineMethod.FIRST_N, n=None, region=None) -> Traces:
         if self.traces is None:
             self.extract_traces()

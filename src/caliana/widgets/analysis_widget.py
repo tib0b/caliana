@@ -4,7 +4,8 @@
 - Compute ΔF/F and toggle raw / ΔF/F display.
 - Detect peaks (height / prominence) and overlay markers; summarise per ROI.
 - Mark optional stimulus events as draggable vertical lines.
-- Cross-ROI propagation is wired but still a backend stub (shows a notice).
+- Compute cross-ROI propagation; overlay per-ROI onset times and summarise
+  speed / direction / source ROI.
 
 Interaction logic lives in plain methods (`compute_dff`, `detect_peaks`,
 `add_event`, `_redraw_traces`) so tests can drive it without a mouse.
@@ -15,6 +16,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..models import BaselineMethod
+from ._plot import FrameTimeAxis
 from ._qt import get_qt
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -63,6 +65,14 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.show_dff = QtWidgets.QCheckBox("Show ΔF/F")
         self.show_dff.toggled.connect(self._redraw_traces)
         row1.addWidget(self.show_dff)
+
+        row1.addWidget(QtWidgets.QLabel("Frame interval (s):"))
+        self.interval_box = QtWidgets.QDoubleSpinBox()
+        self.interval_box.setRange(0.0, 1e6)
+        self.interval_box.setDecimals(4)
+        self.interval_box.setSpecialValueText("frames")  # 0 ⇒ frames-only axis
+        self.interval_box.valueChanged.connect(self._on_interval_changed)
+        row1.addWidget(self.interval_box)
         row1.addStretch(1)
         layout.addLayout(row1)
 
@@ -103,7 +113,8 @@ class AnalysisWidget(QtWidgets.QWidget):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         layout.addWidget(split, stretch=1)
 
-        self.plot = pg.PlotWidget(title="ROI traces")
+        self._time_axis = FrameTimeAxis(orientation="bottom")
+        self.plot = pg.PlotWidget(title="ROI traces", axisItems={"bottom": self._time_axis})
         self.plot.setLabel("bottom", "frame")
         self.plot.addLegend()
         # Draggable baseline window (used in REGION mode).
@@ -126,6 +137,9 @@ class AnalysisWidget(QtWidgets.QWidget):
             self.n_box.setMaximum(T)
             self.event_box.setMaximum(max(0, T - 1))
             self.region.setRegion((0, min(self.n_box.value(), T)))
+        tl = self.session.timeline
+        if tl is not None and tl.frame_interval:
+            self.interval_box.setValue(tl.frame_interval)  # reflect notebook calibration
         self._redraw_traces()
 
     # ------------------------------------------------------------- helpers
@@ -286,6 +300,18 @@ class AnalysisWidget(QtWidgets.QWidget):
         super().closeEvent(event)
 
     # ------------------------------------------------------------- signals
+    def _on_interval_changed(self, value: float):
+        """Toggle the trace x-axis between frames and seconds. SPEC §3 time axis.
+
+        Data coords stay in frames; only tick labels are converted, so the value
+        also propagates to the Timeline (and thus CSV export / static figures).
+        """
+        interval = value or None
+        if self.session.timeline is not None:
+            self.session.timeline.frame_interval = interval
+        self._time_axis.set_frame_interval(interval)
+        self.plot.setLabel("bottom", "time (s)" if interval else "frame")
+
     def _on_baseline_changed(self, _text):
         self.n_box.setEnabled(BaselineMethod(self.baseline_box.currentText()) == BaselineMethod.FIRST_N)
         self._redraw_traces()
