@@ -9,14 +9,18 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the full specification.
 
 ## Install
 
+Directly from the repo, without cloning:
+
 ```bash
-pip install -e .            # core (numpy, scipy, tifffile, pystackreg)
-pip install -e '.[all]'     # + nd2 loading, GUI widgets, analysis & figure extras
-pip install -e '.[gui]'     # just the PyQt/pyqtgraph widget stack
-pip install -e '.[dev]'     # + pytest
+pip install git+https://github.com/tib0b/caliana.git
 ```
 
-Optional-dependency groups: `nd2`, `gui`, `analysis`, `figures`, `dev`, `all`.
+Or from a local checkout (editable):
+
+```bash
+pip install -e .            # everything except test tooling
+pip install -e '.[dev]'     # + pytest
+```
 
 ## Quickstart
 
@@ -57,13 +61,13 @@ workflow end-to-end with rendered plots.
 ## Tests
 
 ```bash
-pip install -e '.[dev,all]'
+pip install -e '.[dev]'
 pytest
 ```
 
-The nd2 test ([`tests/test_io.py`](tests/test_io.py)) auto-skips unless the `nd2`
-extra is installed and a real `.nd2` file is present. GUI tests run headless with
-`QT_QPA_PLATFORM=offscreen`.
+The nd2 test ([`tests/test_io.py`](tests/test_io.py)) auto-skips unless a real
+`.nd2` file is present (the `nd2` reader itself ships with the core install).
+GUI tests run headless with `QT_QPA_PLATFORM=offscreen`.
 
 ## License
 

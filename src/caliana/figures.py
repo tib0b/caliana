@@ -6,8 +6,9 @@ PDF/SVG with embedded, editable fonts and exact column-width sizing — the thin
 journals (and bioelectronics journals in particular) check. Keeping this separate
 from the widgets follows the SPEC §2.2 rule that no business logic lives in the UI.
 
-matplotlib is imported lazily so it stays an optional dependency (the ``figures``
-extra). The four entry points mirror the analysis the tool already produces:
+matplotlib is a core dependency but imported lazily here, so ``import caliana``
+stays cheap for headless/GUI use that never renders a paper figure. The four
+entry points mirror the analysis the tool already produces:
 
     plot_traces            stacked / overlaid ΔF/F traces with event markers
     plot_propagation       cross-ROI onset map + propagation arrow
@@ -97,27 +98,37 @@ def _finish(fig, save: Optional[str], dpi: int):
 def _time_axis(session):
     """(x, label) — real seconds if the Timeline is calibrated, else frames.
 
+    The axis follows the current (possibly cropped) traces: it uses the original
+    frame index of each trace column (``Session.trace_frames``), so a cropped
+    window still plots against its true recording frames/seconds and ``x`` always
+    matches the trace length.
+
     Electrode co-analysis (SPEC §6) will populate ``frame_interval``; until then
     the model is frames-only, so figures default to a frame axis automatically.
     """
+    frames = session.trace_frames()
     tl = session.timeline
-    secs = tl.seconds() if tl is not None else None
-    if secs is not None:
-        return secs, "Time (s)"
-    n = session.traces.raw.shape[1] if session.traces is not None else (
-        len(session.data) if session.data is not None else 0
-    )
-    return np.arange(n), "Frame"
+    if tl is not None and tl.frame_interval:
+        return frames * tl.frame_interval, "Time (s)"
+    return frames, "Frame"
 
 
 def _event_overlay(ax, session, x):
-    """Draw stimulus/event markers as thin labelled lines at their frame index."""
+    """Draw stimulus/event markers as thin labelled lines at their frame index.
+
+    Events are in original frame coordinates; only those falling inside the
+    plotted (possibly cropped) window are drawn, positioned on the same
+    frame/seconds axis as the traces.
+    """
     tl = session.timeline
-    if tl is None or not tl.events:
+    if tl is None or not tl.events or len(x) == 0:
         return
+    frames = session.trace_frames()
+    lo, hi = int(frames[0]), int(frames[-1])
+    scale = tl.frame_interval if tl.frame_interval else 1.0
     for ev in tl.events:
-        if 0 <= ev.frame < len(x):
-            xv = x[ev.frame]
+        if lo <= ev.frame <= hi:
+            xv = ev.frame * scale
             ax.axvline(xv, color="0.4", lw=0.7, ls="--", zorder=0)
             if ev.label:
                 ax.annotate(

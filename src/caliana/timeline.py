@@ -34,7 +34,11 @@ class Timeline:
         return np.arange(self.n_frames)
 
     def seconds(self) -> Optional[np.ndarray]:
-        """Real-time axis if calibrated, else None (frames-only model, SPEC §3).
+        """Real-time axis for the whole recording if calibrated, else None.
+
+        Frames-only model (SPEC §3) returns None. Note this spans every frame;
+        for the (possibly cropped) trace window use ``seconds_for`` with the
+        trace's frame indices (see ``Session.trace_frames``).
 
         Electrode co-analysis (SPEC §6) will require this to be populated and a
         frame<->time mapping defined.
@@ -42,6 +46,16 @@ class Timeline:
         if self.frame_interval is None:
             return None
         return self.frames * self.frame_interval
+
+    def seconds_for(self, frames) -> Optional[np.ndarray]:
+        """Seconds for the given (original) frame indices, or None if uncalibrated.
+
+        Used so a cropped trace window still reports the true recording time:
+        column ``c`` of a crop starting at frame ``f0`` is frame ``f0 + c``.
+        """
+        if self.frame_interval is None:
+            return None
+        return np.asarray(frames, dtype=float) * self.frame_interval
 
     def add_event(self, frame: int, label: str = "") -> Event:
         ev = Event(frame=frame, label=label)

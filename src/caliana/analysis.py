@@ -1,12 +1,15 @@
 """Analyses on ROI traces. SPEC.md §3 Stage III.
 
-Built-ins: ΔF/F, peak detection, cross-ROI propagation. Custom analyses are
-plain Python callables ``f(traces, data) -> result`` (full trust, no sandbox).
+Built-ins: ΔF/F, peak detection, response-onset timing, and cross-ROI
+propagation. Custom analyses are plain Python callables
+``f(traces, data) -> result`` (full trust, no sandbox).
 
-Onset / change-point detection helpers already exist in the repo
-(calcium_onset_detection.py: PELT via `ruptures`; Pivat/src/core/utils.py:
-threshold-on-baseline). Those are the intended building blocks for response
-timing and cross-ROI propagation, to be folded in here.
+The onset detector (``onset_time``) offers a half-max and a
+threshold-on-baseline (``base + k·std``) method — the latter mirrors the
+predecessor detector in Pivat/src/core/utils.py. It is the building block for
+``cross_roi_propagation`` (response timing across ROIs). A change-point
+approach (PELT via ``ruptures``, as in the predecessor calcium_onset_detection.py)
+could be added here as a further onset method.
 """
 from __future__ import annotations
 
@@ -71,6 +74,7 @@ def onset_time(
     baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
+    baseline_region: tuple[int, int] | None = None,
 ) -> float:
     """Frame at which a trace first rises from baseline. SPEC §3 (response timing).
 
@@ -80,27 +84,48 @@ def onset_time(
     - ``half_max``: threshold = baseline + ``frac`` * (max - baseline).
     - ``std``: threshold = baseline_mean + ``k`` * baseline_std
       (mirrors the detector in Pivat/src/core/utils.py).
+
+    The baseline level is estimated over a user-chosen ``baseline_region``
+    ``[start, end)`` when given; otherwise over the first ``baseline_frames``
+    frames, or — failing that — the per-method default (trace min for
+    ``half_max``, the first 10% of frames for ``std``). When a ``baseline_region``
+    is given the rise is searched only from its end onward, so the onset cannot
+    fall within or before the baseline window; otherwise the whole trace is
+    searched.
     """
     sig = np.asarray(sig, dtype=float)
-    base = sig[:baseline_frames].mean() if baseline_frames else float(sig.min())
+    if baseline_region is not None:
+        s, e = baseline_region
+        base_slice = sig[s:e]
+    elif baseline_frames:
+        base_slice = sig[:baseline_frames]
+    else:
+        base_slice = None
+    have_base = base_slice is not None and base_slice.size > 0
 
     if method == "half_max":
+        base = float(base_slice.mean()) if have_base else float(sig.min())
         amp = float(sig.max()) - base
         if amp <= 0:
             return float("nan")
         thresh = base + frac * amp
     elif method == "std":
-        n = baseline_frames or max(1, len(sig) // 10)
-        thresh = sig[:n].mean() + k * sig[:n].std()
+        base_slice = base_slice if have_base else sig[: max(1, len(sig) // 10)]
+        thresh = base_slice.mean() + k * base_slice.std()
     else:
         raise ValueError(f"Unknown onset method {method!r} (expected 'half_max' | 'std')")
 
-    above = np.flatnonzero(sig >= thresh)
+    # An onset can only occur after the baseline window: restrict the crossing
+    # search to frames from the region's end onward, so a rise within or before the
+    # baseline (e.g. a pre-stimulus artifact) can't be picked up. Indices stay in
+    # the original trace's frame coordinates.
+    start = baseline_region[1] if baseline_region is not None else 0
+    above = np.flatnonzero(sig[start:] >= thresh)
     if above.size == 0:
         return float("nan")
-    j = int(above[0])
-    if j == 0:
-        return 0.0
+    j = start + int(above[0])
+    if j == start:
+        return float(start)
     y0, y1 = sig[j - 1], sig[j]
     return float(j) if y1 == y0 else (j - 1) + (thresh - y0) / (y1 - y0)
 
@@ -113,6 +138,7 @@ def cross_roi_propagation(
     baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
+    baseline_region: tuple[int, int] | None = None,
 ) -> dict:
     """Estimate signal propagation across ROIs from response timing. SPEC §3.
 
@@ -120,6 +146,9 @@ def cross_roi_propagation(
     coordinates. The onset-time gradient is the slowness vector (frames/px), so
     speed = 1/|gradient| (px/frame) and its unit vector points in the direction
     of propagation (toward later onset). Units are px/frame (SPEC §3).
+
+    ``baseline_region`` ``[start, end)``, when given, sets the frame window each
+    ROI's onset baseline is measured over (see ``onset_time``).
     """
     data = traces.dff if (signal == "dff" and traces.dff is not None) else traces.raw
     n = data.shape[0]
@@ -127,7 +156,8 @@ def cross_roi_propagation(
         raise ValueError(f"traces ({n}) and rois ({len(rois)}) count mismatch")
 
     onsets = np.array(
-        [onset_time(data[i], method, baseline_frames, frac, k) for i in range(n)]
+        [onset_time(data[i], method, baseline_frames, frac, k, baseline_region)
+         for i in range(n)]
     )
     coords = np.array([roi.center for roi in rois], dtype=float)  # (y, x)
     valid = ~np.isnan(onsets)

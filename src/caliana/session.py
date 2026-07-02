@@ -36,6 +36,9 @@ class Session:
         self.registration = RegistrationResult()
         self.leaf_regions: list[LeafRegion] = []
         self.rois: list[ROI] = []
+        # [start, end) frame window traces are cropped to before analysis; None =>
+        # the whole recording. In original (uncropped) frame indices. SPEC §3.
+        self.crop_window: Optional[tuple[int, int]] = None
         self.traces: Optional[Traces] = None
         self.analyses: dict = {}
 
@@ -140,13 +143,51 @@ class Session:
         return roi
 
     def extract_traces(self) -> Traces:
-        """Mean-intensity raw F trace per ROI. SPEC §3 Stage II."""
+        """Mean-intensity raw F trace per ROI. SPEC §3 Stage II.
+
+        When a ``crop_window`` is set (see ``crop_traces``/``set_crop``) the traces
+        are restricted to that ``[start, end)`` frame interval, so every downstream
+        step (ΔF/F, peaks, propagation, the analysis widget) sees only that window.
+        """
         self._require_data()
         # _working_stack() is the stabilized stack: whole-frame registers the
         # whole image; per-leaf composites each leaf box's stabilized sub-stack,
         # so ROIs inside a box already sample stabilized tissue (SPEC §3).
-        self.traces = roi_mod.extract_all_traces(self._working_stack(), self.rois)
+        stack = self._working_stack()
+        if self.crop_window is not None:
+            start, end = self.crop_window
+            stack = stack[start:end]
+        self.traces = roi_mod.extract_all_traces(stack, self.rois)
         return self.traces
+
+    def set_crop(self, start: Optional[int], end: Optional[int]) -> Traces:
+        """Restrict traces to the ``[start, end)`` frame window, then re-extract.
+
+        ``start=end=None`` (or a window covering the whole recording) clears the
+        crop. The window is stored in original frame indices and honored by every
+        later ``extract_traces``; returns the freshly cropped ``Traces``. SPEC §3.
+        """
+        self._require_data()
+        n = len(self._working_stack())
+        lo = 0 if start is None else max(0, int(start))
+        hi = n if end is None else min(n, int(end))
+        if hi <= lo:
+            raise ValueError(f"empty crop window: [{lo}, {hi})")
+        self.crop_window = None if (lo == 0 and hi == n) else (lo, hi)
+        self._invalidate_traces()
+        return self.extract_traces()
+
+    def crop_traces(self):
+        """[notebook] Open the trace-cropping widget (blocking). SPEC §2.2.
+
+        Preview the full-length ROI traces, drag a window to the interval of
+        interest, and validate; returns the cropped ``Traces`` (also stored on the
+        session so ``analyze`` operates on the same window).
+        """
+        from .widgets._qt import run_widget_blocking
+        from .widgets.crop_widget import CropTracesWidget
+
+        return run_widget_blocking(lambda: CropTracesWidget(self))
 
     # --------------------------------------------------------------- Stage III
     def set_frame_interval(self, seconds_per_frame: Optional[float]) -> "Session":
@@ -218,12 +259,29 @@ class Session:
                  "vertices": None if r.vertices is None else [list(v) for v in r.vertices]}
                 for r in self.rois
             ],
+            "crop_window": None if self.crop_window is None else list(self.crop_window),
             "events": [{"frame": e.frame, "label": e.label} for e in events],
             "analyses": sorted(self.analyses.keys()),
         }
 
+    def trace_frames(self) -> np.ndarray:
+        """Original (downsampled) frame index of each current-trace column.
+
+        Honors ``crop_window`` so exports and figures label the true recording
+        frames: a crop to ``[f0, f1)`` makes column ``c`` map to frame ``f0 + c``.
+        SPEC §3 (time axis).
+        """
+        if self.traces is not None:
+            n = self.traces.raw.shape[1]
+        elif self.data is not None:
+            n = len(self._working_stack())
+        else:
+            n = 0
+        start = self.crop_window[0] if self.crop_window is not None else 0
+        return np.arange(start, start + n)
+
     def export_traces(self, path) -> None:
-        export.traces_to_csv(self.traces, path, self.timeline)
+        export.traces_to_csv(self.traces, path, self.timeline, frames=self.trace_frames())
 
     def export_stack(self, path) -> None:
         """Export the working (stabilized if registered) stack. SPEC §4."""

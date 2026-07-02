@@ -27,7 +27,7 @@ from .models import (
 from .session import Session
 from .timeline import Event, Timeline
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "Session",

@@ -128,6 +128,7 @@ slightly:
    and its own reference = mean of that sub-stack). This handles leaves that
    translate/rotate independently. Pipeline:
    `Load → draw leaf boxes → register each box → place ROIs → traces`.
+   This has been implemented, but the capabilities are currently very limited, and it serves more as a proof of concept.
 
 **Per-leaf details**
 - Leaf boxes are stored in `Session.leaf_regions`; each holds its bbox,
@@ -235,7 +236,6 @@ Analyses operate on the ROI traces (and may reference `Session.data`).
 | Delivery | Reusable PyQt widgets + `Session`; notebook wrappers + app | One implementation usable from notebook and app |
 | Memory | Downsample on load | Keep multi-GB recordings in RAM; full-res only for export |
 | Formats | (OME-)TIFF + nd2, single channel | Covers common acquisition outputs |
-| Units | Pixels / frames only | Avoids unreliable metadata; simpler |
 | Motion | Rigid registration, 3 modes: none / whole-frame / per-leaf (box per leaf) | Multiple leaves move independently; per-leaf stabilizes each without distorting intensities |
 | ROIs | Circle/square or free-hand polygon, overlap allowed | Fixed shapes are fast/comparable; polygons capture whole leaves / irregular regions |
 | Signal | ΔF/F, F0 = first-N-frames or user-selected window | Standard, dataset-appropriate baselines |
@@ -260,15 +260,11 @@ Analyses operate on the ROI traces (and may reference `Session.data`).
   estimation to pre-stimulus frames, or expose a quality check + easy disable.
   (Observed starkly on the synthetic clip, which has no motion and only the
   growing blob as structure — see examples/quickstart.ipynb §2.)
-- Per-leaf mode: leaf-drifts-out-of-box is **resolved** — generous boxes +
-  drift detection with a low-confidence flag carried into traces/provenance;
-  auto-grow deferred (see Stage II "Drift-out-of-box handling"). Still open:
-  whether overlapping leaf boxes should be disallowed outright rather than
-  first-match resolved.
+- Algorithm for per-leaf tracking needs to be improved.
 - **[Phase 2]** Standalone-app packaging (installer), error handling, and
   in-app custom-function support for non-coders.
 - Multi-channel / ratiometric support, affine registration: out of current
-  scope; revisit on demand.
+  scope.
 
 ### Forward compatibility: electrode data (future, not implemented)
 

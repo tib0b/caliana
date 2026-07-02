@@ -15,11 +15,15 @@ import numpy as np
 from .models import Traces
 
 
-def traces_to_csv(traces: Traces, path, timeline=None) -> None:
+def traces_to_csv(traces: Traces, path, timeline=None, frames=None) -> None:
     """Write per-ROI raw F and ΔF/F over time to CSV. SPEC §4.
 
     Columns: a frame (and seconds, if calibrated) axis, then ``<label>_F`` and
     ``<label>_dFF`` per ROI. Rows are timepoints.
+
+    ``frames`` gives the original frame index of each trace column so a cropped
+    window still reports the true recording frames/seconds (see
+    ``Session.trace_frames``); it defaults to ``0..T-1`` when omitted.
     """
     raw = traces.raw
     if raw.size == 0:
@@ -28,7 +32,8 @@ def traces_to_csv(traces: Traces, path, timeline=None) -> None:
     labels = traces.labels or [f"roi_{i}" for i in range(n_roi)]
     has_dff = traces.dff is not None
 
-    seconds = timeline.seconds() if timeline is not None else None
+    frames = np.arange(T) if frames is None else np.asarray(frames)
+    seconds = timeline.seconds_for(frames) if timeline is not None else None
 
     header = ["frame"] + (["seconds"] if seconds is not None else [])
     for lab in labels:
@@ -40,7 +45,7 @@ def traces_to_csv(traces: Traces, path, timeline=None) -> None:
         writer = csv.writer(fh)
         writer.writerow(header)
         for t in range(T):
-            row = [t] + ([seconds[t]] if seconds is not None else [])
+            row = [int(frames[t])] + ([float(seconds[t])] if seconds is not None else [])
             for i in range(n_roi):
                 row.append(raw[i, t])
                 if has_dff:

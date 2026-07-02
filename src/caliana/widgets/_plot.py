@@ -24,3 +24,18 @@ class FrameTimeAxis(pg.AxisItem):
         self.frame_interval = interval
         self.picture = None
         self.update()
+
+
+class SquarePlotWidget(pg.PlotWidget):
+    """A PlotWidget kept square on screen: its height follows its width.
+
+    Each axis still autoscales to its own data (the *data* aspect is not locked),
+    so a scatter whose x and y ranges differ by orders of magnitude renders in a
+    square box instead of a thin strip.
+    """
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        side = self.width()
+        if side > 0 and self.maximumHeight() != side:
+            self.setFixedHeight(side)

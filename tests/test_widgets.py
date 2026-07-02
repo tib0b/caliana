@@ -18,6 +18,7 @@ try:
     from caliana.widgets.import_widget import ImportPreviewWidget
     from caliana.widgets.leaf_widget import LeafSelectionWidget
     from caliana.widgets.roi_widget import RoiSelectionWidget
+    from caliana.widgets.crop_widget import CropTracesWidget
     from caliana.widgets.analysis_widget import AnalysisWidget
     HAVE_GUI = True
 except Exception:  # pragma: no cover - depends on optional deps
@@ -251,6 +252,59 @@ def test_roi_widget_track_motion():
     print("roi widget track-motion OK")
 
 
+def test_crop_traces_widget():
+    """Selecting a window crops every trace to that interval and feeds the same
+    window to downstream extraction / the analysis widget."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    s.add_roi(center=(16, 12), size=4)
+    s.add_roi(center=(8, 6), size=3)
+    w = CropTracesWidget(s)
+
+    # Full recording is previewed; the window spans everything by default.
+    T = len(s.data)
+    assert w._preview.raw.shape == (2, T)
+    assert w.start_box.value() == 0 and w.end_box.value() == T
+
+    # Region and spinboxes stay in sync (both directions).
+    w.set_interval(2, 6)
+    assert tuple(round(v) for v in w.region.getRegion()) == (2, 6)
+    w.region.setRegion((3, 7))
+    assert (w.start_box.value(), w.end_box.value()) == (3, 7)
+
+    # Validating crops the traces and returns them; the session agrees.
+    w.set_interval(2, 6)
+    cropped = w.apply_crop()
+    assert s.crop_window == (2, 6)
+    assert cropped.raw.shape == (2, 4)
+    assert cropped is s.traces
+
+    # The crop is honored on re-extraction (so `analyze` sees the same window).
+    assert s.extract_traces().raw.shape == (2, 4)
+    a = AnalysisWidget(s)
+    assert a.session.traces.raw.shape[1] == 4
+    # The analysis widget plots in original frame coordinates, so its windows and
+    # event range start at the crop start (2), not 0.
+    assert round(a.region.getRegion()[0]) == 2
+    assert a.event_box.minimum() == 2
+    xs = a._curves[0].getData()[0]
+    assert (int(xs[0]), int(xs[-1])) == (2, 5)   # frames 2..5 for a [2, 6) crop
+    a.close()
+
+    # Reset clears the crop back to the whole recording.
+    w2 = CropTracesWidget(s)
+    assert w2.start_box.value() == 2 and w2.end_box.value() == 6  # reflects session
+    full = w2.reset_crop()
+    assert s.crop_window is None and full.raw.shape == (2, T)
+
+    w.close()
+    w2.close()
+    print("crop traces widget OK")
+
+
 def test_analysis_widget():
     if not HAVE_GUI:
         print("GUI stack not available; skipping widget test")
@@ -296,6 +350,55 @@ def test_analysis_widget():
     print("analysis widget OK")
 
 
+def test_analysis_widget_analysis_selection():
+    """Picking an analysis type shows only that analysis' controls; the onset
+    method toggles which propagation parameter is active; and propagation draws
+    the onset-vs-distance graph."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    for center, size in [((16, 12), 4), ((8, 6), 3), ((24, 18), 3)]:
+        s.add_roi(center=center, size=size)
+    w = AnalysisWidget(s)
+
+    # Nothing chosen yet: the empty stack page is shown and the graph is hidden.
+    assert w.param_stack.currentIndex() == 0
+    assert w.prop_plot.isHidden()
+
+    # Peak detection: its panel shows; the propagation graph + baseline band stay hidden.
+    w.analysis_box.setCurrentText("Peak detection")
+    assert w.param_stack.currentIndex() == 1 and w.prop_plot.isHidden()
+    assert w.prop_region.scene() is None
+    w.detect_peaks()
+    assert len(w._scatters) > 0
+
+    # Switching to propagation reveals the graph, the onset-baseline band, and
+    # clears the peak markers.
+    w.analysis_box.setCurrentText("Cross-ROI propagation")
+    assert w.param_stack.currentIndex() == 2 and not w.prop_plot.isHidden()
+    assert w.prop_region.scene() is not None  # baseline band on the trace plot
+    assert len(w._scatters) == 0
+
+    # Onset method gates frac (half_max) vs k (std).
+    w.onset_method_box.setCurrentText("half_max")
+    assert w.frac_box.isEnabled() and not w.k_box.isEnabled()
+    w.onset_method_box.setCurrentText("std")
+    assert not w.frac_box.isEnabled() and w.k_box.isEnabled()
+
+    # Running propagation (baseline = a dragged leading window) overlays onsets and
+    # populates the onset-vs-distance graph.
+    w.onset_method_box.setCurrentText("half_max")
+    w.prop_region.setRegion((0, 2))
+    res = w.compute_propagation()
+    assert res is not None and len(w._onset_lines) >= 1
+    assert len(w.prop_plot.getPlotItem().listDataItems()) >= 1
+
+    w.close()
+    print("analysis widget selection OK")
+
+
 if __name__ == "__main__":
     test_import_preview_widget()
     test_roi_selection_widget()
@@ -303,4 +406,6 @@ if __name__ == "__main__":
     test_roi_widget_shows_leaf_reference()
     test_roi_widget_freehand()
     test_roi_widget_track_motion()
+    test_crop_traces_widget()
     test_analysis_widget()
+    test_analysis_widget_analysis_selection()

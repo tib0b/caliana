@@ -6,6 +6,7 @@ plain script (`python tests/test_smoke.py`).
 """
 from __future__ import annotations
 
+import csv
 import tempfile
 from pathlib import Path
 
@@ -54,6 +55,32 @@ def test_spine():
         assert (Path(d) / "prov.json").stat().st_size > 0
 
 
+def test_crop_time_axis_is_offset():
+    """A crop window shifts the reported frame/second axis by its start, and the
+    time axis length always matches the (cropped) trace length — so calibrated
+    figures don't raise and the CSV labels the true recording frames."""
+    s = caliana.Session()
+    s.data = np.random.default_rng(0).random((100, 12, 12))
+    s.timeline = caliana.Timeline(n_frames=100)
+    s.add_roi(center=(6, 6), size=3, label="c")
+    s.set_frame_interval(2.0)      # seconds axis
+    s.set_crop(20, 60)             # 40-frame window
+    s.compute_dff(n=5)
+
+    frames = s.trace_frames()
+    assert (frames[0], frames[-1], len(frames)) == (20, 59, 40)
+    assert len(frames) == s.traces.raw.shape[1]   # axis matches trace length
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "traces.csv"
+        s.export_traces(path)
+        rows = list(csv.reader(path.open()))
+    assert rows[0][:2] == ["frame", "seconds"]
+    assert rows[1][:2] == ["20", "40.0"]          # first cropped frame -> 40 s
+    assert rows[-1][:2] == ["59", "118.0"]        # last cropped frame -> 118 s
+
+
 if __name__ == "__main__":
     test_spine()
+    test_crop_time_axis_is_offset()
     print("smoke test OK")
