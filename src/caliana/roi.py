@@ -1,9 +1,11 @@
 """ROI masks, trace extraction, and leaf assignment. SPEC.md §3 Stage II."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
-from .models import LeafRegion, ROI, ROIShape, Traces
+from .models import LeafRegion, ROI, ROIShape, RigidTransform, Traces
 
 
 def roi_mask(roi: ROI, shape_yx: tuple[int, int]) -> np.ndarray:
@@ -87,6 +89,46 @@ def extract_all_traces(data: np.ndarray, rois: list[ROI]) -> Traces:
     raw = np.stack([extract_trace(data, r) for r in rois])
     labels = [r.label or f"roi_{i}" for i, r in enumerate(rois)]
     return Traces(raw=raw, labels=labels)
+
+
+def move_roi(roi: ROI, tf: RigidTransform, origin=(0.0, 0.0)) -> ROI:
+    """An ROI re-placed where its tissue sits under rigid transform ``tf``.
+
+    Returns a copy with its geometry mapped by ``registration.map_point`` (the
+    same map the widget preview uses). A polygon's vertices are all transformed
+    (so it translates *and* rotates with the leaf) and its centre re-derived;
+    a circle/square keeps its size and only moves its centre — so it follows the
+    leaf's translation and swings along the rotation arc, but does not itself spin
+    (immaterial for a circle; a square's orientation is left unchanged).
+    """
+    from .registration import map_point
+
+    if roi.shape == ROIShape.POLYGON and roi.vertices:
+        verts = [map_point(v, tf, origin) for v in roi.vertices]
+        return replace(roi, vertices=verts, center=polygon_centroid(verts))
+    return replace(roi, center=map_point(roi.center, tf, origin))
+
+
+def extract_trace_tracked(
+    data: np.ndarray, roi: ROI, transforms: list[RigidTransform], origin=(0.0, 0.0)
+) -> np.ndarray:
+    """Trace of an ROI that *follows the tissue* frame by frame -> raw F ``[T]``.
+
+    Unlike ``extract_trace`` (a static mask on a warped stack), this moves the ROI
+    by each frame's rigid transform and samples the **raw** pixels underneath — no
+    interpolation of the measured intensities, so ΔF/F is not biased by resampling
+    (matters on this dim, low-SNR data). Frames past the end of ``transforms`` use
+    the identity; an ROI that moves fully out of frame yields 0.0 for that frame.
+    """
+    shape_yx = data.shape[1:]
+    out = np.zeros(len(data), dtype=float)
+    ident = RigidTransform()
+    for t in range(len(data)):
+        tf = transforms[t] if t < len(transforms) else ident
+        mask = roi_mask(move_roi(roi, tf, origin), shape_yx)
+        if mask.any():
+            out[t] = data[t][mask].mean()
+    return out
 
 
 def assign_roi_to_leaf(roi: ROI, leaf_regions: list[LeafRegion]) -> int | None:

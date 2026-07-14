@@ -10,7 +10,6 @@ Quick start (headless):
     s.add_roi(center=(64, 80), size=5)
     s.extract_traces()
     s.compute_dff(n=30)            # F0 = mean of first 30 frames
-    s.detect_peaks()
 """
 from __future__ import annotations
 

@@ -7,7 +7,7 @@ import pyqtgraph as pg
 class FrameTimeAxis(pg.AxisItem):
     """Bottom axis that relabels frame ticks as seconds when calibrated.
 
-    Plot data coordinates stay in frames, so ROIs, events, onsets, peaks and the
+    Plot data coordinates stay in frames, so ROIs, events, onsets and the
     baseline region need no rescaling; only the tick *labels* are converted via
     the Timeline's ``frame_interval`` (seconds per frame). ``frame_interval`` of
     None or 0 leaves the axis in frames.

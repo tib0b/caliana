@@ -23,7 +23,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..models import RegistrationMode, ROIShape
-from ..registration import _rigid_to_matrix
+from ..registration import map_point
 from ..roi import polygon_centroid
 from ._plot import FrameTimeAxis
 from ._qt import get_qt
@@ -364,13 +364,12 @@ class RoiSelectionWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _raw_point(point, tf, oy, ox):
-        """Map a (cy, cx) point through transform ``tf`` about box origin (oy, ox)."""
-        m = _rigid_to_matrix(tf)
-        cy, cx = point
-        x, y = cx - ox, cy - oy                        # matrix acts on (x, y, 1)
-        rx = m[0, 0] * x + m[0, 1] * y + m[0, 2]
-        ry = m[1, 0] * x + m[1, 1] * y + m[1, 2]
-        return ry + oy, rx + ox
+        """Map a (cy, cx) point through transform ``tf`` about box origin (oy, ox).
+
+        Delegates to ``registration.map_point`` so the on-screen tracked marker and
+        the headless tracked trace (``roi.extract_trace_tracked``) share one map.
+        """
+        return map_point(point, tf, (oy, ox))
 
     def _place_roi_item(self, record, cy, cx):
         """Move a circle/square ROI graphic so its centre lands at (cy, cx)."""

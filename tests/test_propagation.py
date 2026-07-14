@@ -22,6 +22,15 @@ def test_onset_time_recovers_crossing():
     assert abs(onset_time(sig, frac=0.5) - 18.0) < 0.5
 
 
+def test_fraction_of_max_frac_one_returns_time_to_peak():
+    # frac=1 targets the maximum itself, so the onset is the frame the trace peaks.
+    sig = np.array([0.0, 1.0, 2.0, 5.0, 3.0, 2.0])   # peak at frame 3
+    assert onset_time(sig, method="fraction_of_max", frac=1.0) == 3.0
+    # A non-integer baseline still resolves the peak frame exactly (no float miss).
+    ramp = np.linspace(0.1, 0.3, 50)                 # peak at the last frame
+    assert onset_time(ramp, method="fraction_of_max", frac=1.0) == float(len(ramp) - 1)
+
+
 def test_propagation_speed_and_direction():
     # Known arrival-time field: onset = 5 + 0.2*x + 0.1*y  -> slowness (dy,dx)=(0.1,0.2)
     coords = [(10, 10), (10, 30), (30, 10), (30, 30)]  # (y, x)
@@ -91,8 +100,8 @@ def test_onset_baseline_region_sets_threshold():
     # On a steady ramp the onset is purely threshold-driven, so a higher baseline
     # window raises the threshold and pushes the crossing later.
     sig = np.linspace(0.0, 10.0, 100)
-    early = onset_time(sig, method="half_max", frac=0.5, baseline_region=(0, 10))
-    late = onset_time(sig, method="half_max", frac=0.5, baseline_region=(80, 90))
+    early = onset_time(sig, method="fraction_of_max", frac=0.5, baseline_region=(0, 10))
+    late = onset_time(sig, method="fraction_of_max", frac=0.5, baseline_region=(80, 90))
     assert late > early
     # The recovered onset sits where the ramp crosses base + frac*(max - base).
     base = sig[0:10].mean()
@@ -106,15 +115,16 @@ def test_onset_only_after_baseline_region():
     sig = np.zeros(60)
     sig[:5] = 10.0          # artifact before the baseline
     sig[40:] = 10.0         # the real response
-    t = onset_time(sig, method="half_max", frac=0.5, baseline_region=(10, 30))
+    t = onset_time(sig, method="fraction_of_max", frac=0.5, baseline_region=(10, 30))
     assert t >= 30                     # onset cannot fall within/before the baseline
     assert abs(t - 39.5) < 1.0         # picks up the rise at frame 40
     # Without the region the early artifact is (wrongly) detected as the onset.
-    assert onset_time(sig, method="half_max", frac=0.5) < 5
+    assert onset_time(sig, method="fraction_of_max", frac=0.5) < 5
 
 
 if __name__ == "__main__":
     test_onset_time_recovers_crossing()
+    test_fraction_of_max_frac_one_returns_time_to_peak()
     test_propagation_speed_and_direction()
     test_propagation_two_rois_speed_and_direction()
     test_propagation_two_rois_direction_flips_with_order()

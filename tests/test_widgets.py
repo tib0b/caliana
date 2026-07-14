@@ -323,12 +323,6 @@ def test_analysis_widget():
     data, _ = w._display_data()
     assert data is s.traces.dff
 
-    # Peak detection runs, returns a result per ROI, and overlays markers.
-    results = w.detect_peaks()
-    assert len(results) == 2
-    assert "peaks" in s.analyses
-    assert "Peak summary" in w.results.toPlainText()
-
     # REGION baseline uses the draggable window bounds.
     w.baseline_box.setCurrentText("region")
     w.region.setRegion((1, 5))
@@ -363,33 +357,26 @@ def test_analysis_widget_analysis_selection():
         s.add_roi(center=center, size=size)
     w = AnalysisWidget(s)
 
-    # Nothing chosen yet: the empty stack page is shown and the graph is hidden.
+    # Nothing chosen yet: the empty stack page is shown and the graph + baseline
+    # band are hidden.
     assert w.param_stack.currentIndex() == 0
     assert w.prop_plot.isHidden()
-
-    # Peak detection: its panel shows; the propagation graph + baseline band stay hidden.
-    w.analysis_box.setCurrentText("Peak detection")
-    assert w.param_stack.currentIndex() == 1 and w.prop_plot.isHidden()
     assert w.prop_region.scene() is None
-    w.detect_peaks()
-    assert len(w._scatters) > 0
 
-    # Switching to propagation reveals the graph, the onset-baseline band, and
-    # clears the peak markers.
+    # Selecting propagation reveals its panel, the graph, and the onset-baseline band.
     w.analysis_box.setCurrentText("Cross-ROI propagation")
-    assert w.param_stack.currentIndex() == 2 and not w.prop_plot.isHidden()
+    assert w.param_stack.currentIndex() == 1 and not w.prop_plot.isHidden()
     assert w.prop_region.scene() is not None  # baseline band on the trace plot
-    assert len(w._scatters) == 0
 
-    # Onset method gates frac (half_max) vs k (std).
-    w.onset_method_box.setCurrentText("half_max")
+    # Onset method gates frac (fraction_of_max) vs k (std).
+    w.onset_method_box.setCurrentText("fraction_of_max")
     assert w.frac_box.isEnabled() and not w.k_box.isEnabled()
     w.onset_method_box.setCurrentText("std")
     assert not w.frac_box.isEnabled() and w.k_box.isEnabled()
 
     # Running propagation (baseline = a dragged leading window) overlays onsets and
     # populates the onset-vs-distance graph.
-    w.onset_method_box.setCurrentText("half_max")
+    w.onset_method_box.setCurrentText("fraction_of_max")
     w.prop_region.setRegion((0, 2))
     res = w.compute_propagation()
     assert res is not None and len(w._onset_lines) >= 1
@@ -397,6 +384,60 @@ def test_analysis_widget_analysis_selection():
 
     w.close()
     print("analysis widget selection OK")
+
+
+def test_analysis_widget_onset_heatmap():
+    """The Heatmaps page runs the per-pixel onset detector and shows a map that
+    agrees, pixel for pixel, with the per-ROI onset_time."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    from caliana import analysis
+
+    # Data with a vertical onset gradient: lower rows respond later.
+    rng = np.random.default_rng(2)
+    T, Y, X = 30, 16, 12
+    stack = rng.normal(10, 0.5, (T, Y, X))
+    for y in range(Y):
+        stack[5 + y:, y, :] += 20.0
+    s = caliana.Session()
+    s.data = stack.astype(np.float32)
+    s.timeline = caliana.Timeline(n_frames=T)
+    s.add_roi(center=(4, 6), size=3)
+
+    w = AnalysisWidget(s)
+    assert w.tabs.count() == 2 and w.tabs.tabText(1) == "Heatmaps"
+
+    # fraction_of_max over the whole trace (no baseline window) matches onset_time per pixel.
+    w.hm_base_start.setValue(0)
+    w.hm_base_end.setValue(0)             # empty window ⇒ default (trace-min) baseline
+    mp = w.compute_onset_heatmap()
+    assert mp.shape == (Y, X)
+    ref = analysis.onset_time(s.data[:, 4, 6].astype(float), method="fraction_of_max", frac=0.5)
+    assert abs(float(mp[4, 6]) - float(ref)) < 1e-6
+    # Onset increases down the frame (the injected gradient).
+    per_row = np.nanmean(mp, axis=1)
+    assert per_row[0] < per_row[-1]
+
+    # n×n binning lowers the map resolution.
+    w.hm_bin_box.setValue(2)
+    mp2 = w.compute_onset_heatmap()
+    assert mp2.shape == (Y // 2, X // 2)
+
+    # Method toggle gates frac (fraction_of_max) vs k (std), as on the propagation panel.
+    w.hm_method_box.setCurrentText("std")
+    assert w.hm_k_box.isEnabled() and not w.hm_frac_box.isEnabled()
+
+    # Calibration flips the colour-scale label to seconds.
+    s.set_frame_interval(0.5)
+    w.interval_box.setValue(0.5)
+    w.hm_method_box.setCurrentText("fraction_of_max")
+    w.compute_onset_heatmap()
+    assert w.hm_cbar.getAxis("left").labelText == "onset (s)"
+
+    w.close()
+    print("analysis widget onset heatmap OK")
 
 
 if __name__ == "__main__":
@@ -409,3 +450,4 @@ if __name__ == "__main__":
     test_crop_traces_widget()
     test_analysis_widget()
     test_analysis_widget_analysis_selection()
+    test_analysis_widget_onset_heatmap()

@@ -9,11 +9,21 @@ See [`docs/SPEC.md`](docs/SPEC.md) for the full specification.
 
 ## Install
 
+The following commands must be run in your active python/conda environment.
+
+>Note: if installing into a conda environment, you might first need to 
+>install the git and pip packages, which you can do with:
+>
+>```bash
+>conda install git pip
+>```
+
 Directly from the repo, without cloning:
 
 ```bash
 pip install git+https://github.com/tib0b/caliana.git
 ```
+
 
 Or from a local checkout (editable):
 
@@ -41,7 +51,7 @@ Interactive (after `%gui qt` in a notebook): `s.preview()` (Stage I),
 `s.select_rois()` (Stage II), `s.analyze()` (Stage III). Each reads and writes the
 same `Session`, so widgets and API calls mix freely.
 [`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks the full headless
-workflow end-to-end with rendered plots.
+workflow end-to-end with rendered plots. [`examples/interactive.ipynb`](examples/interactive.ipynb) shows an example workflow using the interactive PyQt widgets.
 
 ## Package layout
 
@@ -52,7 +62,7 @@ workflow end-to-end with rendered plots.
 | `io.py` | Load TIFF/nd2 + downsample-on-load (§3 Stage I) |
 | `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
 | `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
-| `analysis.py` | ΔF/F, peak detection, propagation, custom callables (§3 Stage III) |
+| `analysis.py` | ΔF/F, response-onset timing, propagation, custom callables (§3 Stage III) |
 | `export.py` | Traces CSV, stack TIFF, provenance JSON (§4) |
 | `session.py` | `Session`: single source of truth tying it together (§2.1) |
 | `widgets/` | Embeddable PyQt widgets + notebook blocking wrappers (§2.2) |

@@ -1,10 +1,12 @@
 """Stage III — analysis widget. SPEC.md §3 Stage III.
 
+Two tabbed pages:
+
+**Trace analysis** — analyses of the ROI traces:
 - Choose the ΔF/F baseline: first-N frames, or drag a window on the trace.
 - Compute ΔF/F and toggle raw / ΔF/F display.
 - Pick one analysis to run; only that analysis' controls are shown:
-  - Peak detection (height / prominence): overlay markers, summarise per ROI.
-  - Cross-ROI propagation: choose the onset-time method (half_max / std) and its
+  - Cross-ROI propagation: choose the onset-time method (fraction_of_max / std) and its
     parameters (frac / k), and drag a baseline window (the green band) that sets
     the level onsets are measured from; overlay per-ROI onset times, summarise
     speed / direction / source ROI, and plot distance-along-propagation vs onset
@@ -12,8 +14,14 @@
     seconds when a frame interval is set.
 - Mark optional stimulus events as draggable vertical lines.
 
-Interaction logic lives in plain methods (`compute_dff`, `detect_peaks`,
-`compute_propagation`, `add_event`, `_redraw_traces`) so tests can drive it
+**Heatmaps** — dataset-wide (not per-ROI) maps. Currently a per-pixel onset-time
+heatmap: the same onset detector used for propagation (`analysis.onset_time`) is
+run on every pixel's temporal trace (optionally after n×n binning), colouring
+each pixel by when it first responds. Method / frac / k / baseline mirror the
+propagation controls, so a heatmap pixel and a same-parameter ROI onset agree.
+
+Interaction logic lives in plain methods (`compute_dff`, `compute_propagation`,
+`compute_onset_heatmap`, `add_event`, `_redraw_traces`) so tests can drive it
 without a mouse.
 """
 from __future__ import annotations
@@ -39,7 +47,6 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.resize(1060, 600)
 
         self._curves: list = []
-        self._scatters: list = []
         self._event_lines: list = []
         self._onset_lines: list = []
 
@@ -48,7 +55,20 @@ class AnalysisWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        layout = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+        outer.addWidget(self.tabs, stretch=1)
+        self.tabs.addTab(self._build_traces_page(), "Trace analysis")
+        self.tabs.addTab(self._build_heatmap_page(), "Heatmaps")
+
+        # A single status line shared by both pages.
+        self.status = QtWidgets.QLabel("")
+        outer.addWidget(self.status)
+
+    def _build_traces_page(self) -> "QtWidgets.QWidget":
+        """The ROI-trace analysis page (baseline/ΔF/F, propagation)."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
 
         # Row 1 — baseline / ΔF/F.
         row1 = QtWidgets.QHBoxLayout()
@@ -87,7 +107,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         row2.addWidget(QtWidgets.QLabel("Analysis:"))
         self.analysis_box = QtWidgets.QComboBox()
         self.analysis_box.addItems(
-            ["(select analysis)", "Peak detection", "Cross-ROI propagation"]
+            ["(select analysis)", "Cross-ROI propagation"]
         )
         self.analysis_box.currentIndexChanged.connect(self._on_analysis_changed)
         row2.addWidget(self.analysis_box)
@@ -107,8 +127,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         # Stack pages line up 1:1 with the analysis_box items above.
         self.param_stack = QtWidgets.QStackedWidget()
         self.param_stack.addWidget(QtWidgets.QWidget())        # 0: nothing selected
-        self.param_stack.addWidget(self._build_peak_panel())   # 1: peak detection
-        self.param_stack.addWidget(self._build_prop_panel())   # 2: propagation
+        self.param_stack.addWidget(self._build_prop_panel())   # 1: propagation
         layout.addWidget(self.param_stack)
 
         # Plot (left) + results / propagation graph (right).
@@ -147,34 +166,90 @@ class AnalysisWidget(QtWidgets.QWidget):
         right.setSizes([240, 360])
         split.addWidget(right)
         split.setSizes([700, 360])
+        return page
 
-        self.status = QtWidgets.QLabel("")
-        layout.addWidget(self.status)
+    # ---------------------------------------------------------- heatmap page
+    def _build_heatmap_page(self) -> "QtWidgets.QWidget":
+        """Dataset onset-time heatmap: the per-ROI onset detector run per pixel.
+
+        Reuses ``session.onset_heatmap`` (which wraps the same ``onset_time``
+        detector as the propagation analysis) so the map and a same-parameter ROI
+        onset agree. Controls mirror the propagation panel — method + frac/k and a
+        baseline window — plus spatial binning to trade resolution for SNR/speed.
+        """
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Onset method:"))
+        self.hm_method_box = QtWidgets.QComboBox()
+        self.hm_method_box.addItems(["fraction_of_max", "std"])
+        self.hm_method_box.currentTextChanged.connect(self._on_hm_method_changed)
+        row.addWidget(self.hm_method_box)
+
+        self.hm_frac_label = QtWidgets.QLabel("frac:")
+        row.addWidget(self.hm_frac_label)
+        self.hm_frac_box = QtWidgets.QDoubleSpinBox()
+        self.hm_frac_box.setRange(0.01, 1.0)   # frac=1 targets the peak (time-to-max)
+        self.hm_frac_box.setSingleStep(0.05)
+        self.hm_frac_box.setValue(0.5)
+        self.hm_frac_box.setToolTip("fraction_of_max threshold = baseline + frac·(max − baseline)")
+        row.addWidget(self.hm_frac_box)
+
+        self.hm_k_label = QtWidgets.QLabel("k:")
+        row.addWidget(self.hm_k_label)
+        self.hm_k_box = QtWidgets.QDoubleSpinBox()
+        self.hm_k_box.setRange(0.0, 100.0)
+        self.hm_k_box.setSingleStep(0.5)
+        self.hm_k_box.setValue(3.0)
+        self.hm_k_box.setToolTip("std threshold = baseline_mean + k·baseline_std")
+        row.addWidget(self.hm_k_box)
+
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("Baseline [start, end):"))
+        self.hm_base_start = QtWidgets.QSpinBox()
+        self.hm_base_start.setRange(0, 100000)
+        row.addWidget(self.hm_base_start)
+        self.hm_base_end = QtWidgets.QSpinBox()
+        self.hm_base_end.setRange(0, 100000)
+        row.addWidget(self.hm_base_end)
+
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("Bin (n×n):"))
+        self.hm_bin_box = QtWidgets.QSpinBox()
+        self.hm_bin_box.setRange(1, 64)
+        self.hm_bin_box.setValue(1)
+        self.hm_bin_box.setToolTip("Mean-pool n×n pixel blocks before onset detection")
+        row.addWidget(self.hm_bin_box)
+
+        self.hm_btn = QtWidgets.QPushButton("Compute heatmap")
+        self.hm_btn.clicked.connect(self.compute_onset_heatmap)
+        row.addWidget(self.hm_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        # Image + linked colorbar. NaN pixels (no detected onset) render transparent.
+        self._hm_cmap = pg.colormap.get("inferno")
+        self.hm_view = pg.GraphicsLayoutWidget()
+        self.hm_plot = self.hm_view.addPlot()
+        self.hm_plot.setAspectLocked(True)
+        self.hm_plot.invertY(True)              # image row 0 at the top
+        self.hm_plot.getViewBox().setDefaultPadding(0.02)
+        self.hm_image = pg.ImageItem()
+        self.hm_image.setOpts(axisOrder="row-major")  # data is [Y, X]
+        self.hm_plot.addItem(self.hm_image)
+        # interactive=True gives draggable level handles on the colour bar — the
+        # intensity/contrast control, echoing the preview widget's level region.
+        self.hm_cbar = pg.ColorBarItem(colorMap=self._hm_cmap, interactive=True,
+                                       label="onset (frame)")
+        self.hm_cbar.setImageItem(self.hm_image)
+        self.hm_view.addItem(self.hm_cbar)
+        v.addWidget(self.hm_view, stretch=1)
+
+        self._on_hm_method_changed(self.hm_method_box.currentText())
+        return page
 
     # ------------------------------------------------------- analysis panels
-    def _build_peak_panel(self) -> "QtWidgets.QWidget":
-        panel = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(panel)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QtWidgets.QLabel("Height:"))
-        self.height_box = QtWidgets.QDoubleSpinBox()
-        self.height_box.setRange(-1e9, 1e9)
-        self.height_box.setSpecialValueText("auto")
-        self.height_box.setValue(self.height_box.minimum())  # "auto"
-        row.addWidget(self.height_box)
-
-        row.addWidget(QtWidgets.QLabel("Prominence:"))
-        self.prom_box = QtWidgets.QDoubleSpinBox()
-        self.prom_box.setRange(0.0, 1e9)
-        self.prom_box.setValue(0.0)
-        row.addWidget(self.prom_box)
-
-        self.peaks_btn = QtWidgets.QPushButton("Detect peaks")
-        self.peaks_btn.clicked.connect(self.detect_peaks)
-        row.addWidget(self.peaks_btn)
-        row.addStretch(1)
-        return panel
-
     def _build_prop_panel(self) -> "QtWidgets.QWidget":
         panel = QtWidgets.QWidget()
         row = QtWidgets.QHBoxLayout(panel)
@@ -185,17 +260,17 @@ class AnalysisWidget(QtWidgets.QWidget):
         row.addSpacing(16)
         row.addWidget(QtWidgets.QLabel("Onset method:"))
         self.onset_method_box = QtWidgets.QComboBox()
-        self.onset_method_box.addItems(["half_max", "std"])
+        self.onset_method_box.addItems(["fraction_of_max", "std"])
         self.onset_method_box.currentTextChanged.connect(self._on_onset_method_changed)
         row.addWidget(self.onset_method_box)
 
         self.frac_label = QtWidgets.QLabel("frac:")
         row.addWidget(self.frac_label)
         self.frac_box = QtWidgets.QDoubleSpinBox()
-        self.frac_box.setRange(0.01, 0.99)
+        self.frac_box.setRange(0.01, 1.0)      # frac=1 targets the peak (time-to-max)
         self.frac_box.setSingleStep(0.05)
         self.frac_box.setValue(0.5)
-        self.frac_box.setToolTip("half_max threshold = baseline + frac·(max − baseline)")
+        self.frac_box.setToolTip("fraction_of_max threshold = baseline + frac·(max − baseline)")
         row.addWidget(self.frac_box)
 
         self.k_label = QtWidgets.QLabel("k:")
@@ -227,6 +302,18 @@ class AnalysisWidget(QtWidgets.QWidget):
             # Onset baseline defaults to the same leading window; clamp it in-bounds.
             self.prop_region.setBounds((start, start + T))
             self.prop_region.setRegion((start, start + min(self.n_box.value(), T)))
+        if self.session.data is not None:
+            # Heatmap baseline window: same leading frames as the trace baselines,
+            # in original-frame coordinates, clamped to the (possibly cropped) span.
+            start = self._crop_start()
+            if self.session.crop_window is not None:
+                nframes = self.session.crop_window[1] - self.session.crop_window[0]
+            else:
+                nframes = len(self.session._working_stack())
+            self.hm_base_start.setRange(start, start + max(0, nframes - 1))
+            self.hm_base_end.setRange(start, start + nframes)
+            self.hm_base_start.setValue(start)
+            self.hm_base_end.setValue(start + min(self.n_box.value(), nframes))
         tl = self.session.timeline
         if tl is not None and tl.frame_interval:
             self.interval_box.setValue(tl.frame_interval)  # reflect notebook calibration
@@ -266,8 +353,8 @@ class AnalysisWidget(QtWidgets.QWidget):
     def _crop_start(self):
         """First original frame index of the current traces (0 if uncropped).
 
-        The plot works in original frame coordinates so its x-axis, events, onset
-        and peak markers stay consistent with a crop window and with CSV/figure
+        The plot works in original frame coordinates so its x-axis, events, and
+        onset markers stay consistent with a crop window and with CSV/figure
         export; trace *columns* are offset by this when indexing the arrays.
         """
         cw = self.session.crop_window
@@ -287,21 +374,6 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.show_dff.setChecked(True)
         self._redraw_traces()
         self.status.setText(f"ΔF/F computed ({method.value}).")
-
-    def detect_peaks(self):
-        data, _labels = self._display_data()
-        if data is None or data.shape[0] == 0:
-            self.status.setText("No traces; place ROIs first.")
-            return
-        height = None if self.height_box.value() == self.height_box.minimum() else self.height_box.value()
-        prom = self.prom_box.value() or None
-        results = self.session.detect_peaks(
-            use_dff=self.show_dff.isChecked(), threshold=height, prominence=prom
-        )
-        self._overlay_peaks(data, results)
-        self._write_peak_summary(results)
-        self.status.setText("Peaks detected.")
-        return results
 
     def add_event(self, frame: int):
         ev = self.session.timeline.add_event(int(frame))
@@ -339,6 +411,52 @@ class AnalysisWidget(QtWidgets.QWidget):
         )
         return result
 
+    def compute_onset_heatmap(self):
+        """Run the per-pixel onset detector over the dataset and show the heatmap."""
+        if self.session.data is None:
+            self.status.setText("No data loaded.")
+            return None
+        start = self._crop_start()  # baseline boxes are in frames; map indexes from 0
+        lo, hi = self.hm_base_start.value() - start, self.hm_base_end.value() - start
+        region = (lo, hi) if hi > lo else None
+        mp = self.session.onset_heatmap(
+            method=self.hm_method_box.currentText(),
+            frac=self.hm_frac_box.value(), k=self.hm_k_box.value(),
+            baseline_region=region, bin_size=self.hm_bin_box.value(),
+        )
+        self._show_heatmap(mp)
+        return mp
+
+    def _show_heatmap(self, mp):
+        """Display an onset map, converting frames→seconds when calibrated.
+
+        Onset columns are shifted by the crop start so the colour scale reads in
+        original-recording frames (or seconds), matching the trace page. Pixels
+        with no detected onset are NaN and render transparent.
+        """
+        start = self._crop_start()
+        iv = self._frame_interval()
+        disp = (start + np.asarray(mp, dtype=float)) * (iv or 1.0)
+        finite = np.isfinite(disp)
+        if not finite.any():
+            self.hm_image.clear()
+            self.status.setText("No onsets detected with these parameters.")
+            return
+        lo = float(np.nanmin(disp))
+        hi = float(np.nanmax(disp))
+        if hi <= lo:
+            hi = lo + 1.0
+        self.hm_image.setImage(disp, autoLevels=False)
+        # Fine, unit-agnostic drag steps for the interactive level handles: ~200
+        # steps across the data span, so contrast is adjustable in frames or seconds.
+        self.hm_cbar.rounding = max((hi - lo) / 200.0, 1e-9)
+        self.hm_cbar.setLevels((lo, hi))
+        self.hm_cbar.setLabel("left", f"onset ({self._time_unit()})")
+        self.hm_plot.getViewBox().autoRange(padding=0.02)
+        self.status.setText(
+            f"Onset heatmap: {int(finite.sum())}/{disp.size} pixels responded."
+        )
+
     def _overlay_onsets(self, onsets):
         self._clear_onsets()
         start = self._crop_start()  # onsets are trace-column indices -> frames
@@ -357,11 +475,6 @@ class AnalysisWidget(QtWidgets.QWidget):
         for line in self._onset_lines:
             self.plot.removeItem(line)
         self._onset_lines.clear()
-
-    def _clear_peaks(self):
-        for item in self._scatters:
-            self.plot.removeItem(item)
-        self._scatters.clear()
 
     def _plot_propagation_fit(self, result):
         """Scatter each ROI's distance from the source (y) against its onset *delay*
@@ -451,10 +564,9 @@ class AnalysisWidget(QtWidgets.QWidget):
 
     # -------------------------------------------------------------- drawing
     def _redraw_traces(self):
-        for item in self._curves + self._scatters:
+        for item in self._curves:
             self.plot.removeItem(item)
         self._curves.clear()
-        self._scatters.clear()
 
         # Baseline region visible only in REGION mode.
         in_plot = self.region.scene() is not None
@@ -475,37 +587,6 @@ class AnalysisWidget(QtWidgets.QWidget):
             self._curves.append(curve)
         ylabel = "ΔF/F" if (self.show_dff.isChecked() and self.session.traces.dff is not None) else "mean intensity"
         self.plot.setLabel("left", ylabel)
-
-    def _overlay_peaks(self, data, results):
-        self._clear_peaks()
-        start = self._crop_start()  # peak indices are trace columns -> frames
-        for i, res in enumerate(results):
-            idx = res["indices"]
-            if len(idx) == 0:
-                continue
-            scatter = pg.ScatterPlotItem(
-                x=start + np.asarray(idx), y=data[i, idx], symbol="t",
-                brush=pg.intColor(i, hues=max(6, len(results))), size=10, pen=None,
-            )
-            self.plot.addItem(scatter)
-            self._scatters.append(scatter)
-
-    def _write_peak_summary(self, results):
-        labels = self.session.traces.labels
-        lines = ["Peak summary", "============"]
-        iv = self._frame_interval()
-        for i, res in enumerate(results):
-            lab = labels[i] if i < len(labels) else f"roi_{i}"
-            ttp = res["time_to_peak"]  # frames from the trace start
-            if ttp is None:
-                ttp_str = "n/a"
-            else:
-                ttp_str = f"{ttp * iv:.4g} s" if iv else f"{ttp} frames"
-            lines.append(
-                f"{lab}: count={res['count']}, time-to-peak={ttp_str}, "
-                f"max amp={float(np.max(res['amplitudes'])) if res['count'] else float('nan'):.4g}"
-            )
-        self.results.setPlainText("\n".join(lines))
 
     def closeEvent(self, event):
         self.result = self.session.analyses
@@ -536,7 +617,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         shows markers for the analysis currently selected.
         """
         self.param_stack.setCurrentIndex(index)
-        is_prop = index == 2  # "Cross-ROI propagation"
+        is_prop = index == 1  # "Cross-ROI propagation"
         self.prop_plot.setVisible(is_prop)
         # The onset-baseline band lives on the trace plot only while propagation
         # is the active analysis.
@@ -545,15 +626,21 @@ class AnalysisWidget(QtWidgets.QWidget):
             self.plot.addItem(self.prop_region)
         elif not is_prop and in_plot:
             self.plot.removeItem(self.prop_region)
-        if index != 1:        # leaving peak detection
-            self._clear_peaks()
         if not is_prop:       # leaving propagation
             self._clear_onsets()
 
     def _on_onset_method_changed(self, method: str):
-        """frac applies to half_max, k to std — enable only the relevant one."""
-        is_half = method == "half_max"
-        self.frac_label.setEnabled(is_half)
-        self.frac_box.setEnabled(is_half)
-        self.k_label.setEnabled(not is_half)
-        self.k_box.setEnabled(not is_half)
+        """frac applies to fraction_of_max, k to std — enable only the relevant one."""
+        is_frac = method == "fraction_of_max"
+        self.frac_label.setEnabled(is_frac)
+        self.frac_box.setEnabled(is_frac)
+        self.k_label.setEnabled(not is_frac)
+        self.k_box.setEnabled(not is_frac)
+
+    def _on_hm_method_changed(self, method: str):
+        """Heatmap counterpart of ``_on_onset_method_changed``."""
+        is_frac = method == "fraction_of_max"
+        self.hm_frac_label.setEnabled(is_frac)
+        self.hm_frac_box.setEnabled(is_frac)
+        self.hm_k_label.setEnabled(not is_frac)
+        self.hm_k_box.setEnabled(not is_frac)

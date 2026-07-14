@@ -1,6 +1,6 @@
 """Smoke test for the headless Caliana spine. SPEC.md §3.
 
-Exercises load -> downsample -> ROI -> trace -> ΔF/F -> peaks -> provenance
+Exercises load -> downsample -> ROI -> trace -> ΔF/F -> provenance
 against the repo's synthetic_calcium_imaging.tif. Runnable with pytest or as a
 plain script (`python tests/test_smoke.py`).
 """
@@ -37,10 +37,6 @@ def test_spine():
     # ΔF/F with a first-N-frames baseline (SPEC §3 Stage III).
     s.compute_dff(n=min(10, T))
     assert s.traces.dff.shape == (2, T)
-
-    # Peak detection runs and returns a result per ROI.
-    peaks = s.detect_peaks()
-    assert len(peaks) == 2
 
     # Provenance is JSON-serializable and records the import params.
     prov = s.provenance()

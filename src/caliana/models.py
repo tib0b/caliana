@@ -77,13 +77,21 @@ class RegistrationMode(str, Enum):
 
 @dataclass
 class RigidTransform:
-    """Per-frame rigid transform: translation + rotation only. SPEC.md §3 Stage II.
+    """Per-frame motion transform (raw → reference). SPEC.md §3 Stage II.
 
-    theta is in degrees, rotation about the region centre.
+    ``dy``/``dx``/``theta`` (theta in degrees) are the rigid summary — translation
+    plus rotation about the region centre — and are what the drift-out heuristic
+    and any human-readable readout use. When the registration model estimates more
+    than a rigid body (``scaled_rotation``/``affine``), ``matrix`` holds the full
+    3x3 homogeneous transform including scale/shear; it is the authoritative form
+    used to warp frames and move ROIs, so that scale/shear carries through to the
+    stabilized output. When ``matrix`` is ``None`` the transform is exactly the
+    rigid body described by the scalar fields.
     """
     dy: float = 0.0
     dx: float = 0.0
     theta: float = 0.0
+    matrix: Optional[np.ndarray] = None    # full 3x3 (raw→reference); overrides scalars when set
 
 
 @dataclass

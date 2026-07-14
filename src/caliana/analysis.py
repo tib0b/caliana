@@ -1,10 +1,10 @@
 """Analyses on ROI traces. SPEC.md §3 Stage III.
 
-Built-ins: ΔF/F, peak detection, response-onset timing, and cross-ROI
-propagation. Custom analyses are plain Python callables
+Built-ins: ΔF/F, response-onset timing, and cross-ROI propagation.
+Custom analyses are plain Python callables
 ``f(traces, data) -> result`` (full trust, no sandbox).
 
-The onset detector (``onset_time``) offers a half-max and a
+The onset detector (``onset_time``) offers a fraction-of-max and a
 threshold-on-baseline (``base + k·std``) method — the latter mirrors the
 predecessor detector in Pivat/src/core/utils.py. It is the building block for
 ``cross_roi_propagation`` (response timing across ROIs). A change-point
@@ -46,31 +46,9 @@ def compute_dff(
     return traces
 
 
-def detect_peaks(trace: np.ndarray, threshold: float | None = None,
-                 prominence: float | None = None) -> dict:
-    """Per-trace peaks: indices, amplitudes, time-to-peak, count. SPEC §3.
-
-    Thin wrapper over ``scipy.signal.find_peaks`` (imported lazily).
-    """
-    from scipy.signal import find_peaks
-
-    kwargs: dict = {}
-    if threshold is not None:
-        kwargs["height"] = threshold
-    if prominence is not None:
-        kwargs["prominence"] = prominence
-    idx, _props = find_peaks(trace, **kwargs)
-    return {
-        "indices": idx,
-        "amplitudes": trace[idx] if len(idx) else np.array([]),
-        "time_to_peak": int(idx[np.argmax(trace[idx])]) if len(idx) else None,
-        "count": int(len(idx)),
-    }
-
-
 def onset_time(
     sig: np.ndarray,
-    method: str = "half_max",
+    method: str = "fraction_of_max",
     baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
@@ -81,17 +59,19 @@ def onset_time(
     Robust for step-like sustained responses (unlike peak finding). Returns a
     sub-frame value via linear interpolation, or NaN if no rise is detected.
 
-    - ``half_max``: threshold = baseline + ``frac`` * (max - baseline).
+    - ``fraction_of_max``: threshold = baseline + ``frac`` * (max - baseline), for
+      ``frac`` in ``(0, 1]``. ``frac=1`` targets the maximum itself, so the returned
+      frame is the time the trace reaches its peak (time-to-max).
     - ``std``: threshold = baseline_mean + ``k`` * baseline_std
       (mirrors the detector in Pivat/src/core/utils.py).
 
     The baseline level is estimated over a user-chosen ``baseline_region``
     ``[start, end)`` when given; otherwise over the first ``baseline_frames``
     frames, or — failing that — the per-method default (trace min for
-    ``half_max``, the first 10% of frames for ``std``). When a ``baseline_region``
-    is given the rise is searched only from its end onward, so the onset cannot
-    fall within or before the baseline window; otherwise the whole trace is
-    searched.
+    ``fraction_of_max``, the first 10% of frames for ``std``). When a
+    ``baseline_region`` is given the rise is searched only from its end onward, so
+    the onset cannot fall within or before the baseline window; otherwise the whole
+    trace is searched.
     """
     sig = np.asarray(sig, dtype=float)
     if baseline_region is not None:
@@ -103,17 +83,20 @@ def onset_time(
         base_slice = None
     have_base = base_slice is not None and base_slice.size > 0
 
-    if method == "half_max":
+    if method == "fraction_of_max":
         base = float(base_slice.mean()) if have_base else float(sig.min())
-        amp = float(sig.max()) - base
+        peak = float(sig.max())
+        amp = peak - base
         if amp <= 0:
             return float("nan")
-        thresh = base + frac * amp
+        # frac == 1 targets the peak; clamp so float error in base + amp can't push
+        # the threshold above the attained maximum (which would miss the crossing).
+        thresh = min(base + frac * amp, peak)
     elif method == "std":
         base_slice = base_slice if have_base else sig[: max(1, len(sig) // 10)]
         thresh = base_slice.mean() + k * base_slice.std()
     else:
-        raise ValueError(f"Unknown onset method {method!r} (expected 'half_max' | 'std')")
+        raise ValueError(f"Unknown onset method {method!r} (expected 'fraction_of_max' | 'std')")
 
     # An onset can only occur after the baseline window: restrict the crossing
     # search to frames from the region's end onward, so a rise within or before the
@@ -130,11 +113,98 @@ def onset_time(
     return float(j) if y1 == y0 else (j - 1) + (thresh - y0) / (y1 - y0)
 
 
+def onset_time_map(
+    stack: np.ndarray,
+    method: str = "fraction_of_max",
+    baseline_frames: int | None = None,
+    frac: float = 0.5,
+    k: float = 3.0,
+    baseline_region: tuple[int, int] | None = None,
+    bin_size: int = 1,
+) -> np.ndarray:
+    """Per-pixel response-onset time over an image ``stack`` ``[T, Y, X]``. SPEC §3.
+
+    Applies the same detector as ``onset_time`` independently to every pixel's
+    temporal trace and returns a 2D ``[Y, X]`` map of onset frames (NaN where no
+    rise is detected), so onset timing can be visualised as a heatmap rather than
+    only per ROI. ``method``/``frac``/``k``/``baseline_frames``/``baseline_region``
+    carry exactly the meaning they have in ``onset_time`` — this is a vectorised
+    equivalent of calling it on each pixel, so a heatmap and a same-parameter ROI
+    onset agree by construction.
+
+    ``bin_size`` (``b``) mean-pools the stack into non-overlapping ``b×b`` blocks
+    before detection (e.g. 2 ⇒ 2×2 binning), trading spatial resolution for SNR
+    and speed; the map is then ``[Y // b, X // b]``. Any partial edge block is
+    dropped.
+    """
+    stack = np.asarray(stack, dtype=float)
+    if stack.ndim != 3:
+        raise ValueError(f"stack must be [T, Y, X]; got shape {stack.shape}")
+    T, Y, X = stack.shape
+    b = max(1, int(bin_size))
+    if b > 1:
+        Yb, Xb = Y // b, X // b
+        if Yb == 0 or Xb == 0:
+            raise ValueError(f"bin_size {b} larger than the {Y}×{X} frame")
+        stack = stack[:, : Yb * b, : Xb * b].reshape(T, Yb, b, Xb, b).mean(axis=(2, 4))
+    else:
+        Yb, Xb = Y, X
+    sig = stack.reshape(T, -1)                         # [T, P] one column per pixel
+    P = sig.shape[1]
+
+    # Per-pixel baseline, mirroring onset_time's precedence: explicit region, then
+    # a leading frame count, then the per-method default.
+    if baseline_region is not None:
+        s, e = baseline_region
+        base_slice = sig[s:e]
+    elif baseline_frames:
+        base_slice = sig[:baseline_frames]
+    else:
+        base_slice = None
+    have_base = base_slice is not None and base_slice.shape[0] > 0
+
+    if method == "fraction_of_max":
+        base = base_slice.mean(axis=0) if have_base else sig.min(axis=0)
+        peak = sig.max(axis=0)
+        amp = peak - base
+        # frac == 1 targets the peak; clamp so float error can't lift the threshold
+        # above the attained maximum (which would miss the crossing).
+        thresh = np.minimum(base + frac * amp, peak)
+        undefined = amp <= 0                            # flat pixel -> no onset
+    elif method == "std":
+        bs = base_slice if have_base else sig[: max(1, T // 10)]
+        thresh = bs.mean(axis=0) + k * bs.std(axis=0)
+        undefined = np.zeros(P, dtype=bool)
+    else:
+        raise ValueError(f"Unknown onset method {method!r} (expected 'fraction_of_max' | 'std')")
+
+    # First frame at/after the baseline window whose value reaches threshold.
+    start = baseline_region[1] if baseline_region is not None else 0
+    above = sig[start:] >= thresh[None, :]
+    crossed = above.any(axis=0)
+    j = start + np.argmax(above, axis=0)                # argmax=0 where never crossed
+
+    onset = np.full(P, np.nan)
+    valid = crossed & ~undefined
+    cols = np.flatnonzero(valid)
+    jj = j[cols]
+    thr = thresh[cols]
+    y1 = sig[jj, cols]
+    y0 = sig[np.clip(jj - 1, 0, T - 1), cols]
+    denom = y1 - y0
+    # Sub-frame crossing by linear interpolation, except a crossing already at the
+    # search start (no earlier sample) or a flat step (denom==0) sits on the frame.
+    interp = np.where(denom == 0, jj.astype(float),
+                      (jj - 1) + (thr - y0) / np.where(denom == 0, 1.0, denom))
+    onset[cols] = np.where(jj == start, float(start), interp)
+    return onset.reshape(Yb, Xb)
+
+
 def cross_roi_propagation(
     traces: Traces,
     rois: list[ROI],
     signal: str = "dff",
-    method: str = "half_max",
+    method: str = "fraction_of_max",
     baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,

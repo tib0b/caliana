@@ -34,6 +34,10 @@ class Session:
         self.registered_data: Optional[np.ndarray] = None  # stabilized stack (SPEC §2.1)
         self.timeline: Optional[Timeline] = None
         self.registration = RegistrationResult()
+        # When True, traces are extracted by moving each ROI with its leaf's
+        # per-frame transform over the RAW stack (ROI-follows-tissue), instead of
+        # sampling a warped stack. Set by register(apply=False). SPEC §3 Stage II.
+        self.track_motion: bool = False
         self.leaf_regions: list[LeafRegion] = []
         self.rois: list[ROI] = []
         # [start, end) frame window traces are cropped to before analysis; None =>
@@ -73,27 +77,65 @@ class Session:
         self.leaf_regions.append(leaf)
         return leaf
 
-    def register(self, mode=RegistrationMode.WHOLE_FRAME, reference: str = "mean") -> "Session":
-        """Run motion correction in the chosen mode. SPEC §3 Stage II."""
+    def register(
+        self,
+        mode=RegistrationMode.WHOLE_FRAME,
+        reference: str = "mean",
+        mask: bool = False,
+        apply: bool = True,
+        transformation: str = "affine",
+    ) -> "Session":
+        """Run motion correction in the chosen mode. SPEC §3 Stage II.
+
+        ``mask=True`` estimates the transforms on the tissue-segmented stack, so
+        registration tracks the dim leaf silhouette instead of the static bright
+        background (recommended for these recordings; see
+        ``registration.segment_tissue``).
+
+        ``transformation`` selects the pystackreg model used to estimate motion
+        (e.g. ``"affine"``, ``"rigid_body"``, ``"translation"``; see
+        ``registration._STACKREG_TRANSFORMS``). The full estimated matrix is kept,
+        so scale/shear from ``affine``/``scaled_rotation`` carries through to the
+        stabilized stack and to ROI tracking.
+
+        ``apply`` selects how the stabilized traces are produced:
+
+        - ``True`` (default): warp the stack into ``registered_data`` and place
+          static ROIs on it — the original behavior.
+        - ``False``: keep the raw pixels and instead **move each ROI with its
+          tissue** at extraction time (``track_motion``). This avoids resampling
+          the intensities being measured, so ΔF/F is not biased by interpolation —
+          preferable on dim, low-SNR data.
+        """
         self._require_data()
         mode = RegistrationMode(mode)
         self.registered_data = None
+        self.track_motion = False
         if mode == RegistrationMode.NONE:
             self.registration = RegistrationResult(mode=mode, reference=reference)
         elif mode == RegistrationMode.WHOLE_FRAME:
-            self.registration = registration_mod.register_whole_frame(self.data, reference)
-            self.registered_data = registration_mod.apply_transforms(
-                self.data, self.registration.transforms
+            self.registration = registration_mod.register_whole_frame(
+                self.data, reference, mask=mask, transformation=transformation
             )
+            if apply:
+                self.registered_data = registration_mod.apply_transforms(
+                    self.data, self.registration.transforms
+                )
+            else:
+                self.track_motion = True
         elif mode == RegistrationMode.PER_LEAF:
             if not self.leaf_regions:
                 raise ValueError("per-leaf mode requires leaf_regions; draw boxes first")
             self.leaf_regions = registration_mod.register_per_leaf(
-                self.data, self.leaf_regions, reference
+                self.data, self.leaf_regions, reference, mask=mask,
+                transformation=transformation,
             )
-            self.registered_data = registration_mod.apply_per_leaf(
-                self.data, self.leaf_regions
-            )
+            if apply:
+                self.registered_data = registration_mod.apply_per_leaf(
+                    self.data, self.leaf_regions
+                )
+            else:
+                self.track_motion = True
             self.registration = RegistrationResult(mode=mode, reference=reference)
         self._invalidate_traces()
         return self
@@ -147,18 +189,73 @@ class Session:
 
         When a ``crop_window`` is set (see ``crop_traces``/``set_crop``) the traces
         are restricted to that ``[start, end)`` frame interval, so every downstream
-        step (ΔF/F, peaks, propagation, the analysis widget) sees only that window.
+        step (ΔF/F, propagation, the analysis widget) sees only that window.
         """
         self._require_data()
-        # _working_stack() is the stabilized stack: whole-frame registers the
-        # whole image; per-leaf composites each leaf box's stabilized sub-stack,
-        # so ROIs inside a box already sample stabilized tissue (SPEC §3).
+        # Two extraction paradigms (SPEC §3):
+        #  - track_motion: keep raw pixels, move each ROI with its tissue per frame
+        #    (no resampling of the measured intensities).
+        #  - otherwise: _working_stack() is the stabilized stack (whole-frame warp,
+        #    or per-leaf composite of stabilized sub-stacks) and ROIs are static.
         stack = self._working_stack()
+        start = 0
         if self.crop_window is not None:
             start, end = self.crop_window
             stack = stack[start:end]
-        self.traces = roi_mod.extract_all_traces(stack, self.rois)
+        if self.track_motion and self._has_transforms():
+            self.traces = self._extract_tracked(stack, start)
+        else:
+            self.traces = roi_mod.extract_all_traces(stack, self.rois)
         return self.traces
+
+    def _has_transforms(self) -> bool:
+        """Whether registration produced per-frame transforms to track ROIs with."""
+        reg = self.registration
+        if reg.mode == RegistrationMode.WHOLE_FRAME:
+            return bool(reg.transforms)
+        if reg.mode == RegistrationMode.PER_LEAF:
+            return any(leaf.transforms for leaf in self.leaf_regions)
+        return False
+
+    def _roi_transform_series(self, roi: ROI):
+        """The (per-frame transforms, box-origin) that carry ``roi`` with its tissue.
+
+        Whole-frame ROIs use the global transforms about origin (0, 0); a per-leaf
+        ROI uses its assigned leaf's transforms about that box's top-left corner
+        (transforms are box-local). Returns ``(None, None)`` when nothing applies
+        (e.g. an ROI in no leaf box) so the caller falls back to a static trace.
+        """
+        reg = self.registration
+        if reg.mode == RegistrationMode.WHOLE_FRAME and reg.transforms:
+            return reg.transforms, (0.0, 0.0)
+        if reg.mode == RegistrationMode.PER_LEAF:
+            idx = roi.leaf_region
+            if idx is not None and 0 <= idx < len(self.leaf_regions):
+                leaf = self.leaf_regions[idx]
+                if leaf.transforms:
+                    y0, _y1, x0, _x1 = leaf.bbox
+                    return leaf.transforms, (float(y0), float(x0))
+        return None, None
+
+    def _extract_tracked(self, stack: np.ndarray, start: int) -> Traces:
+        """Traces from ROIs that follow the tissue over the raw ``stack``.
+
+        ``start`` is the first frame index (crop offset) so per-frame transforms,
+        which are indexed in original recording frames, line up with the (possibly
+        cropped) stack. ROIs with no applicable transform fall back to a static mask.
+        """
+        if not self.rois:
+            return Traces(raw=np.empty((0, len(stack))), labels=[])
+        rows, labels = [], []
+        for i, roi in enumerate(self.rois):
+            transforms, origin = self._roi_transform_series(roi)
+            if transforms is None:
+                rows.append(roi_mod.extract_trace(stack, roi))
+            else:
+                window = transforms[start:start + len(stack)]
+                rows.append(roi_mod.extract_trace_tracked(stack, roi, window, origin))
+            labels.append(roi.label or f"roi_{i}")
+        return Traces(raw=np.stack(rows), labels=labels)
 
     def set_crop(self, start: Optional[int], end: Optional[int]) -> Traces:
         """Restrict traces to the ``[start, end)`` frame window, then re-extract.
@@ -206,20 +303,39 @@ class Session:
             self.extract_traces()
         return analysis.compute_dff(self.traces, method=BaselineMethod(method), n=n, region=region)
 
-    def detect_peaks(self, use_dff: bool = True, **kwargs) -> list[dict]:
-        if self.traces is None:
-            self.extract_traces()
-        signal = self.traces.dff if (use_dff and self.traces.dff is not None) else self.traces.raw
-        results = [analysis.detect_peaks(signal[i], **kwargs) for i in range(len(signal))]
-        self.analyses["peaks"] = results
-        return results
-
     def cross_roi_propagation(self, **kwargs):
         if self.traces is None:
             self.extract_traces()
         result = analysis.cross_roi_propagation(self.traces, self.rois, **kwargs)
         self.analyses["propagation"] = result
         return result
+
+    def onset_heatmap(
+        self,
+        method: str = "fraction_of_max",
+        frac: float = 0.5,
+        k: float = 3.0,
+        baseline_region: tuple[int, int] | None = None,
+        bin_size: int = 1,
+    ) -> np.ndarray:
+        """Per-pixel response-onset heatmap over the working stack. SPEC §3.
+
+        Runs the same onset detector used per ROI (``analysis.onset_time``) on every
+        (optionally ``bin_size×bin_size`` binned) pixel of the stabilized stack,
+        honoring ``crop_window`` so the heatmap covers the same frame interval as
+        the traces. ``baseline_region`` is given in trace-column coordinates
+        (relative to the crop start), matching ``cross_roi_propagation``. Returns a
+        2D ``[Y, X]`` map of onset frames (NaN where no rise is detected).
+        """
+        self._require_data()
+        stack = self._working_stack()
+        if self.crop_window is not None:
+            s, e = self.crop_window
+            stack = stack[s:e]
+        return analysis.onset_time_map(
+            stack, method=method, frac=frac, k=k,
+            baseline_region=baseline_region, bin_size=bin_size,
+        )
 
     def apply(self, func: Callable):
         """Run a custom callable ``f(traces, data) -> result``. SPEC §3."""
@@ -247,6 +363,7 @@ class Session:
             "registration": {
                 "mode": self.registration.mode.value,
                 "reference": self.registration.reference,
+                "motion_tracking": self.track_motion,
                 "leaf_regions": [
                     {"bbox": list(lr.bbox), "label": lr.label,
                      "low_confidence_frames": lr.low_confidence_frames}
