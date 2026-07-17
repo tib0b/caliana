@@ -1,7 +1,7 @@
 """Caliana — analysis of plant calcium imaging data.
 
-A library of reusable PyQt widgets around a central `Session` object, usable from
-a Jupyter notebook or (Phase 2) a standalone app. See SPEC.md for the full design.
+Reusable PyQt widgets around a central ``Session`` object, usable from a Jupyter
+notebook or a standalone app.
 
 Quick start (headless):
 

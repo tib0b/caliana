@@ -1,7 +1,7 @@
-"""Core data structures for Caliana. See SPEC.md §2.1 (the Session model).
+"""Core data structures for Caliana.
 
-These are plain dataclasses/enums with no Qt or I/O dependencies, so they can be
-imported anywhere (notebook, app, tests) and serialized for provenance (SPEC §4).
+Plain dataclasses/enums with no Qt or I/O dependencies, so they can be imported
+anywhere (notebook, app, tests) and serialized for provenance.
 """
 from __future__ import annotations
 
@@ -18,21 +18,21 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 @dataclass
 class ImportParams:
-    """Downsample-on-load parameters. SPEC.md §3 Stage I.
+    """Downsample-on-load parameters. Units are pixels and frame indices only.
 
-    Units are pixels and frame indices only — no physical calibration.
+    Frames ``[start, end)`` are kept, then temporal/spatial downsampling applied.
     """
     start: int = 0
     end: Optional[int] = None              # exclusive; None => until the end
-    temporal_step: int = 1                 # average every N frames (1 = off)
-    spatial_step: int = 1                  # spatial stride / binning (1 = off)
-    spatial_window: Optional[tuple[int, int, int, int]] = None  # (y0, y1, x0, x1)
-    channel: int = 0                       # single-channel model: which channel to keep
+    temporal_step: int = 1                 # average every N frames (1 = no averaging)
+    spatial_step: int = 1                  # keep every Nth pixel per axis (1 = full res)
+    spatial_window: Optional[tuple[int, int, int, int]] = None  # crop (y0, y1, x0, x1); None = full
+    channel: int = 0                       # which channel to keep (single-channel model)
 
 
 @dataclass
 class SourceInfo:
-    """Where the data came from + how it was imported (for provenance, SPEC §4)."""
+    """Where the data came from and how it was imported (for provenance)."""
     path: Path
     import_params: ImportParams = field(default_factory=ImportParams)
     metadata: dict = field(default_factory=dict)   # raw reader metadata; units ignored
@@ -49,14 +49,11 @@ class ROIShape(str, Enum):
 
 @dataclass
 class ROI:
-    """Circle/square or free-hand polygon ROI. SPEC.md §3 Stage II.
+    """A region of interest: circle, square, or free-hand polygon.
 
-    Overlap between ROIs is permitted; no disjointness is enforced.
-
-    For CIRCLE/SQUARE the mask is defined by ``center`` + ``size``. For POLYGON
-    the mask is defined by ``vertices`` (a free-hand outline); ``center`` is then
-    the polygon centroid (used for leaf assignment and propagation) and ``size``
-    is unused.
+    For CIRCLE/SQUARE the mask is ``center`` + ``size`` (radius / half-side). For
+    POLYGON it is ``vertices``; ``size`` is ignored and ``center`` holds the polygon
+    centroid. ROIs may overlap.
     """
     center: tuple[float, float]            # (y, x) in pixels
     size: float                            # circle radius / square half-side, px
@@ -77,16 +74,13 @@ class RegistrationMode(str, Enum):
 
 @dataclass
 class RigidTransform:
-    """Per-frame motion transform (raw → reference). SPEC.md §3 Stage II.
+    """Per-frame motion transform (raw → reference).
 
-    ``dy``/``dx``/``theta`` (theta in degrees) are the rigid summary — translation
-    plus rotation about the region centre — and are what the drift-out heuristic
-    and any human-readable readout use. When the registration model estimates more
-    than a rigid body (``scaled_rotation``/``affine``), ``matrix`` holds the full
-    3x3 homogeneous transform including scale/shear; it is the authoritative form
-    used to warp frames and move ROIs, so that scale/shear carries through to the
-    stabilized output. When ``matrix`` is ``None`` the transform is exactly the
-    rigid body described by the scalar fields.
+    ``dy``, ``dx``, ``theta`` (degrees) are the rigid summary: translation plus
+    rotation about the region centre. ``matrix``, when set, is the full 3x3
+    homogeneous transform (acting on ``(x, y, 1)``) and is authoritative — it
+    carries scale/shear from ``scaled_rotation``/``affine`` models through warping
+    and ROI motion. ``matrix=None`` means a pure rigid body given by the scalars.
     """
     dy: float = 0.0
     dx: float = 0.0
@@ -96,10 +90,10 @@ class RigidTransform:
 
 @dataclass
 class LeafRegion:
-    """A user-drawn leaf box with its own independent registration. SPEC.md §3.
+    """A user-drawn leaf box with its own independent registration.
 
-    Draw boxes generously: tissue that drifts outside its box across the
-    recording cannot be stabilized (see SPEC "Drift-out-of-box handling").
+    Draw boxes generously: tissue that drifts outside its box cannot be stabilized
+    (such frames are flagged in ``low_confidence_frames``).
     """
     bbox: tuple[int, int, int, int]                       # (y0, y1, x0, x1)
     label: str = ""
@@ -110,9 +104,9 @@ class LeafRegion:
 
 @dataclass
 class RegistrationResult:
-    """Whole-session registration state. SPEC.md §2.1 / §3 Stage II."""
+    """Whole-session registration state."""
     mode: RegistrationMode = RegistrationMode.NONE
-    reference: str = "mean"                               # "mean" | "first"
+    reference: str = "mean"                               # "mean" | "first" | "previous"
     transforms: list[RigidTransform] = field(default_factory=list)   # whole-frame mode
 
 
@@ -121,9 +115,9 @@ class RegistrationResult:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Traces:
-    """Per-ROI fluorescence traces. SPEC.md §3 (trace extraction / ΔF/F)."""
+    """Per-ROI fluorescence traces (raw F and optional ΔF/F)."""
     raw: np.ndarray                        # [n_roi, T] mean intensity inside each ROI
-    dff: Optional[np.ndarray] = None       # [n_roi, T] (F - F0)/F0
+    dff: Optional[np.ndarray] = None       # [n_roi, T] (F - F0)/F0; None until compute_dff
     labels: list[str] = field(default_factory=list)
 
 

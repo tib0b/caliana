@@ -1,8 +1,8 @@
-"""Loading & downsample-on-load. SPEC.md §3 Stage I.
+"""Loading & downsample-on-load.
 
-The temporal-averaging subsample mirrors the predecessor's approach in
-Pivat/src/core/utils.py (get_array_from_tif). Optional readers (nd2) are
-imported lazily so `import caliana` works before they are installed.
+Reads ``.tif``/``.tiff`` and ``.nd2`` into a single-channel ``[T, Y, X]`` stack.
+Optional readers (nd2) are imported lazily so ``import caliana`` works before they
+are installed.
 """
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from .models import ImportParams, SourceInfo
 
 
 def load_stack(path, params: ImportParams | None = None) -> tuple[np.ndarray, SourceInfo]:
-    """Load a single-channel ``[T, Y, X]`` stack with import params applied.
+    """Load a ``.tif``/``.tiff``/``.nd2`` file → ``(data [T, Y, X], SourceInfo)``.
 
-    Returns ``(data, source_info)``. Units are pixels/frames only (SPEC §3).
+    ``params`` (default: no downsampling) selects the channel, temporal window and
+    temporal/spatial downsampling. Raises ``ValueError`` on an unsupported suffix.
     """
     path = Path(path)
     params = params or ImportParams()

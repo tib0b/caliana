@@ -1,4 +1,4 @@
-"""ROI masks, trace extraction, and leaf assignment. SPEC.md §3 Stage II."""
+"""ROI masks, trace extraction, and leaf assignment."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -39,10 +39,10 @@ def polygon_centroid(vertices) -> tuple[float, float]:
 
 
 def polygon_mask(vertices, shape_yx: tuple[int, int]) -> np.ndarray:
-    """Rasterize a polygon (free-hand ROI) to a boolean mask. SPEC §3 Stage II.
+    """Rasterize a polygon (free-hand ROI) to a boolean mask over ``(Y, X)``.
 
-    Even-odd ray casting evaluated at pixel centres, vectorized over the polygon's
-    bounding box (numpy only — no skimage/matplotlib dependency on the core path).
+    Even-odd ray casting at pixel centres, vectorized over the polygon's bounding
+    box (numpy only). Returns all-False for fewer than 3 vertices.
     """
     h, w = shape_yx
     v = np.asarray(vertices, dtype=float)
@@ -75,7 +75,7 @@ def _points_in_polygon(py, px, vy, vx) -> np.ndarray:
 
 
 def extract_trace(data: np.ndarray, roi: ROI) -> np.ndarray:
-    """Mean pixel intensity inside the ROI per frame -> raw F ``[T]``. SPEC §3."""
+    """Mean pixel intensity inside the ROI per frame → raw F ``[T]`` (0 if empty)."""
     mask = roi_mask(roi, data.shape[1:])
     if not mask.any():
         return np.zeros(len(data), dtype=float)
@@ -83,7 +83,7 @@ def extract_trace(data: np.ndarray, roi: ROI) -> np.ndarray:
 
 
 def extract_all_traces(data: np.ndarray, rois: list[ROI]) -> Traces:
-    """Raw F traces for every ROI -> ``Traces.raw`` ``[n_roi, T]``. SPEC §3."""
+    """Raw F traces for every ROI → ``Traces`` with ``raw`` ``[n_roi, T]``."""
     if not rois:
         return Traces(raw=np.empty((0, len(data))), labels=[])
     raw = np.stack([extract_trace(data, r) for r in rois])
@@ -92,14 +92,12 @@ def extract_all_traces(data: np.ndarray, rois: list[ROI]) -> Traces:
 
 
 def move_roi(roi: ROI, tf: RigidTransform, origin=(0.0, 0.0)) -> ROI:
-    """An ROI re-placed where its tissue sits under rigid transform ``tf``.
+    """A copy of ``roi`` re-placed where its tissue sits under transform ``tf``.
 
-    Returns a copy with its geometry mapped by ``registration.map_point`` (the
-    same map the widget preview uses). A polygon's vertices are all transformed
-    (so it translates *and* rotates with the leaf) and its centre re-derived;
-    a circle/square keeps its size and only moves its centre — so it follows the
-    leaf's translation and swings along the rotation arc, but does not itself spin
-    (immaterial for a circle; a square's orientation is left unchanged).
+    A polygon's vertices are all mapped (so it translates and rotates with the
+    leaf); a circle/square keeps its size and only moves its centre (it follows the
+    translation but is not itself rotated). ``origin`` is the box-local origin for
+    per-leaf transforms (see ``registration.map_point``).
     """
     from .registration import map_point
 
@@ -112,13 +110,12 @@ def move_roi(roi: ROI, tf: RigidTransform, origin=(0.0, 0.0)) -> ROI:
 def extract_trace_tracked(
     data: np.ndarray, roi: ROI, transforms: list[RigidTransform], origin=(0.0, 0.0)
 ) -> np.ndarray:
-    """Trace of an ROI that *follows the tissue* frame by frame -> raw F ``[T]``.
+    """Trace of an ROI that follows the tissue frame by frame → raw F ``[T]``.
 
-    Unlike ``extract_trace`` (a static mask on a warped stack), this moves the ROI
-    by each frame's rigid transform and samples the **raw** pixels underneath — no
-    interpolation of the measured intensities, so ΔF/F is not biased by resampling
-    (matters on this dim, low-SNR data). Frames past the end of ``transforms`` use
-    the identity; an ROI that moves fully out of frame yields 0.0 for that frame.
+    Moves the ROI by each frame's transform and samples the raw pixels underneath,
+    so the measured intensities are never resampled (unlike a static mask on a
+    warped stack) — ΔF/F is not biased by interpolation. Frames past the end of
+    ``transforms`` use the identity; a frame with the ROI fully out of view is 0.0.
     """
     shape_yx = data.shape[1:]
     out = np.zeros(len(data), dtype=float)
@@ -132,10 +129,10 @@ def extract_trace_tracked(
 
 
 def assign_roi_to_leaf(roi: ROI, leaf_regions: list[LeafRegion]) -> int | None:
-    """Auto-assign an ROI to the leaf box containing its centre (first match).
+    """Index of the first leaf box containing the ROI's centre, or None.
 
-    SPEC §3: per-leaf mode. Returns None if the centre falls in no box
-    (unassigned -> no per-leaf stabilization; should be surfaced to the user).
+    None means the centre falls in no box, so the ROI gets no per-leaf
+    stabilization — surface this to the user.
     """
     cy, cx = roi.center
     for i, leaf in enumerate(leaf_regions):

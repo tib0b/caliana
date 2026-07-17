@@ -1,8 +1,8 @@
-"""Export & provenance. SPEC.md §4.
+"""Export & provenance.
 
-- traces -> CSV (raw F + ΔF/F, rows = frames, cols = ROIs)
-- processed/registered stack -> TIFF
-- provenance -> JSON sidecar so any analysis is reproducible
+- traces → CSV (raw F + ΔF/F, rows = frames, cols = ROIs)
+- processed/registered stack → TIFF
+- provenance → JSON sidecar so any analysis is reproducible
 """
 from __future__ import annotations
 
@@ -16,14 +16,13 @@ from .models import Traces
 
 
 def traces_to_csv(traces: Traces, path, timeline=None, frames=None) -> None:
-    """Write per-ROI raw F and ΔF/F over time to CSV. SPEC §4.
+    """Write per-ROI raw F and ΔF/F over time to a CSV at ``path``.
 
-    Columns: a frame (and seconds, if calibrated) axis, then ``<label>_F`` and
-    ``<label>_dFF`` per ROI. Rows are timepoints.
-
-    ``frames`` gives the original frame index of each trace column so a cropped
-    window still reports the true recording frames/seconds (see
-    ``Session.trace_frames``); it defaults to ``0..T-1`` when omitted.
+    Columns: ``frame`` (plus ``seconds`` if ``timeline`` is calibrated), then
+    ``<label>_F`` and ``<label>_dFF`` per ROI; rows are timepoints. ``frames`` gives
+    the original frame index of each column (defaults to ``0..T-1``) so a cropped
+    window still reports true recording frames/seconds. Raises ``ValueError`` if
+    there are no traces.
     """
     raw = traces.raw
     if raw.size == 0:
@@ -54,12 +53,12 @@ def traces_to_csv(traces: Traces, path, timeline=None, frames=None) -> None:
 
 
 def stack_to_tiff(stack: np.ndarray, path) -> None:
-    """Write a (registered/downsampled) image stack to TIFF. SPEC §4."""
+    """Write an image stack to a TIFF at ``path``."""
     import tifffile
 
     tifffile.imwrite(str(Path(path)), np.asarray(stack))
 
 
 def write_provenance(session, path) -> None:
-    """Dump the run's full parameter record as a JSON sidecar. SPEC §4."""
+    """Dump ``session.provenance()`` as a JSON sidecar at ``path``."""
     Path(path).write_text(json.dumps(session.provenance(), indent=2))

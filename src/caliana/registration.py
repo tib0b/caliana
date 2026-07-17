@@ -1,9 +1,8 @@
-"""Rigid registration (leaf-motion correction). SPEC.md §3 Stage II.
+"""Motion correction (leaf-motion registration).
 
-Three modes — none / whole-frame / per-leaf — all using rigid (translation +
-rotation) transforms only. Estimation runs on the downsampled stack; `pystackreg`
-is imported lazily. Per-leaf mode registers each leaf box's sub-stack
-independently and flags drift-out-of-box frames as low-confidence.
+Three modes — none / whole-frame / per-leaf. Estimation runs on the downsampled
+stack via ``pystackreg`` (imported lazily). Per-leaf mode registers each leaf
+box's sub-stack independently and flags drift-out-of-box frames as low-confidence.
 """
 from __future__ import annotations
 
@@ -15,10 +14,11 @@ from .models import LeafRegion, RegistrationResult, RegistrationMode, RigidTrans
 
 
 def make_reference(stack: np.ndarray, reference: str = "mean") -> np.ndarray:
-    """Build the stored registration target. SPEC §3: default mean image, else first frame.
+    """Build the stored registration target image.
 
-    ``"previous"`` registers each frame to its predecessor inside pystackreg, so there
-    is no single target image; the first frame is kept as the representative reference.
+    reference: ``"mean"`` (mean over time), ``"first"``, or ``"previous"``.
+    ``"previous"`` has no single target (each frame registers to its predecessor),
+    so the first frame is stored as its representative reference.
     """
     if reference == "mean":
         return stack.mean(axis=0)
@@ -30,14 +30,10 @@ def make_reference(stack: np.ndarray, reference: str = "mean") -> np.ndarray:
 def map_point(point_yx, tf: RigidTransform, origin_yx=(0.0, 0.0)) -> tuple[float, float]:
     """Map a (y, x) point through transform ``tf`` about ``origin_yx``.
 
-    This is the single source of truth for "where does this tissue point sit in
-    the raw frame". The transform maps raw→reference; applied to a
-    reference-frame point it returns the raw position, so an ROI placed on the
-    stabilized view follows the tissue as the leaf moves (the ROI-tracking path,
-    SPEC §3). Per-leaf transforms are estimated in box-local coordinates, so pass
-    the box's top-left ``(y0, x0)`` as the origin; whole-frame uses ``(0, 0)``.
-    Both the ROI-selection widget preview and headless trace extraction call this,
-    so the picture on screen and the extracted trace can never diverge.
+    ``tf`` maps raw→reference, so applied to a reference-frame point this returns
+    the raw position — an ROI on the stabilized view thus follows the tissue as the
+    leaf moves. Per-leaf transforms are box-local: pass the box's top-left
+    ``(y0, x0)`` as ``origin_yx``; whole-frame uses ``(0, 0)``.
     """
     m = _rigid_to_matrix(tf)
     cy, cx = point_yx
@@ -51,8 +47,7 @@ def map_point(point_yx, tf: RigidTransform, origin_yx=(0.0, 0.0)) -> tuple[float
 def _otsu_threshold(values: np.ndarray) -> float:
     """Otsu's threshold on a 1-D array of intensities (numpy only, no skimage).
 
-    Splits the histogram into two classes maximizing between-class variance; used
-    to separate the dark leaf tissue from the bright, high-texture background.
+    Splits the histogram into two classes maximizing between-class variance.
     """
     v = np.asarray(values, dtype=float).ravel()
     hist, edges = np.histogram(v, bins=256)
@@ -73,14 +68,12 @@ def _otsu_threshold(values: np.ndarray) -> float:
 
 
 def segment_tissue(image: np.ndarray, dark: bool = True, close: int = 2, open_: int = 2) -> np.ndarray:
-    """Boolean mask of the leaf tissue in a 2-D image. SPEC §3 Stage II.
+    """Boolean mask of the leaf tissue in a 2-D image, by Otsu threshold.
 
-    The recordings are dim silhouettes: leaves are dark and low-texture, the
-    background (soil/perlite, instruments) is bright, high-texture and static.
-    Plain intensity registration therefore locks onto the static background, not
-    the leaves. Masking to the tissue (``dark=True``: pixels below Otsu) before
-    estimation restores a strong, moving edge for the registration to track.
-    Morphological open→close removes speckle and fills small holes.
+    dark: True keeps pixels below the threshold (dark leaves on a bright
+    background — the usual case here); False keeps pixels above it.
+    close / open_: iterations of morphological closing / opening to fill small
+    holes and remove speckle (0 disables either).
     """
     from scipy.ndimage import binary_closing, binary_opening
 
@@ -95,15 +88,11 @@ def segment_tissue(image: np.ndarray, dark: bool = True, close: int = 2, open_: 
 
 
 def _silhouette_stack(stack: np.ndarray) -> np.ndarray:
-    """Per-frame binary tissue silhouette (0/1), as the registration target.
+    """Per-frame binary tissue silhouette (0/1), used as the registration target.
 
-    For dark-on-bright recordings the leaf *boundary* carries the motion, while
-    the raw intensities are dim and low-contrast and the bright background is
-    static. Segmenting each frame and registering the silhouettes makes the leaf
-    edge the dominant, high-contrast feature (0→1), so the rigid estimate tracks
-    the tissue instead of the immobile background. The silhouettes are stable
-    frame-to-frame on real data (high IoU); if segmentation flickered it would add
-    jitter, which is why this is opt-in (``mask=True``), not the default.
+    Registering silhouettes makes the moving leaf edge the dominant feature, so the
+    estimate tracks the tissue instead of the static bright background. Opt-in
+    (``mask=True``) because flickering segmentation would add jitter.
     """
     stack = np.asarray(stack, dtype=float)
     return np.stack([segment_tissue(f).astype(float) for f in stack])
@@ -112,12 +101,9 @@ def _silhouette_stack(stack: np.ndarray) -> np.ndarray:
 def _matrix_to_rigid(m: np.ndarray) -> RigidTransform:
     """Wrap a pystackreg 3x3 homogeneous transform as a ``RigidTransform``.
 
-    The matrix acts on (x, y, 1). We keep it verbatim in ``matrix`` (the
-    authoritative form, so scale/shear from ``scaled_rotation``/``affine`` survive
-    to warping and ROI motion) and *also* read off the rigid summary — translation
-    from the last column and rotation from ``arctan2(m10, m00)`` — for the drift
-    heuristic and display. For a pure rigid body the summary reproduces the matrix
-    exactly (see ``_rigid_to_matrix``).
+    Keeps the matrix verbatim (authoritative, so scale/shear survives) and also
+    reads off the rigid summary — translation from the last column, rotation from
+    ``arctan2(m10, m00)`` — for the drift heuristic and display.
     """
     m = np.asarray(m, dtype=float)
     theta = np.degrees(np.arctan2(m[1, 0], m[0, 0]))
@@ -125,10 +111,10 @@ def _matrix_to_rigid(m: np.ndarray) -> RigidTransform:
 
 
 def _rigid_to_matrix(tf: RigidTransform) -> np.ndarray:
-    """The 3x3 homogeneous transform for ``tf`` (acts on (x, y, 1)).
+    """The 3x3 homogeneous transform for ``tf`` (acts on ``(x, y, 1)``).
 
-    Uses the full estimated ``matrix`` when present (carrying scale/shear);
-    otherwise rebuilds the pure rigid body from the scalar summary.
+    Uses ``tf.matrix`` when present (carrying scale/shear); otherwise rebuilds the
+    pure rigid body from the scalar summary.
     """
     if tf.matrix is not None:
         return np.asarray(tf.matrix, dtype=float)
@@ -137,10 +123,10 @@ def _rigid_to_matrix(tf: RigidTransform) -> np.ndarray:
     return np.array([[c, -s, tf.dx], [s, c, tf.dy], [0.0, 0.0, 1.0]], dtype=float)
 
 
-# pystackreg transformation models, keyed by friendly name so callers (and the
-# Session layer) never have to import pystackreg just to pick one. Restricted to
-# the models that produce a plain 3x3 homogeneous matrix (BILINEAR's 4x4 form is
-# not a 3x3 affine and cannot round-trip through ``RigidTransform.matrix``).
+# Accepted ``transformation`` names → pystackreg model, so callers never import
+# pystackreg to pick one. Ordered least→most free (translation ⊂ rigid ⊂ scaled
+# rotation ⊂ affine). BILINEAR is excluded: its 4x4 form can't round-trip through
+# ``RigidTransform.matrix``.
 _STACKREG_TRANSFORMS = {
     "translation": "TRANSLATION",
     "rigid_body": "RIGID_BODY",
@@ -151,11 +137,8 @@ _STACKREG_TRANSFORMS = {
 
 
 def _resolve_transformation(transformation: str) -> int:
-    """Map a friendly transformation name to a ``StackReg`` model constant.
-
-    The full estimated matrix is retained on ``RigidTransform.matrix``, so
-    scale/shear from ``scaled_rotation``/``affine`` carries through to warping and
-    ROI motion; ``rigid_body`` and ``translation`` are the rigid special cases.
+    """Map a ``transformation`` name (see ``_STACKREG_TRANSFORMS``) to its
+    ``StackReg`` model constant. Raises ``ValueError`` on an unknown name.
     """
     from pystackreg import StackReg
 
@@ -175,18 +158,15 @@ def register_whole_frame(
     mask: bool = False,
     transformation: str = "affine",
 ) -> RegistrationResult:
-    """One rigid transform per frame vs the reference. SPEC §3 Stage II.
+    """Estimate one transform per frame against a fixed reference.
 
-    Estimates one transform per frame against a fixed reference (mean image by
-    default, or first frame). ``transformation`` selects the pystackreg model used
-    for estimation — one of ``_STACKREG_TRANSFORMS`` (e.g. ``"affine"``,
-    ``"rigid_body"``, ``"translation"``); the full estimated matrix is retained, so
-    scale/shear carries through to warping and ROIs (see ``_matrix_to_rigid``).
-    With ``mask=True`` the estimate runs on the per-frame tissue silhouette so it
-    tracks the dim leaf boundary rather than locking onto the immobile bright
-    background — see ``_silhouette_stack`` / ``segment_tissue``. The returned
-    transforms still describe the full frame, so they apply unchanged to warping or
-    ROIs.
+    reference: ``"mean"`` (default), ``"first"``, or ``"previous"``.
+    transformation: pystackreg model — ``"translation"``, ``"rigid_body"``
+        (alias ``"rigid"``), ``"scaled_rotation"``, or ``"affine"`` (default). The
+        full estimated matrix is kept, so scale/shear survives to warping and ROIs.
+    mask: estimate on the per-frame tissue silhouette instead of raw intensities,
+        so registration tracks the dim leaf rather than the static bright
+        background (recommended for these recordings).
     """
     from pystackreg import StackReg
 
@@ -208,9 +188,8 @@ def register_whole_frame(
 def _drift_out_frames(transforms: list[RigidTransform], shape_yx, frac: float) -> list[int]:
     """Frames whose displacement approaches the box margin (drift-out-of-box).
 
-    Heuristic: flag a frame when its translation magnitude relative to the
-    reference exceeds ``frac`` of the box's smaller side (SPEC "Drift-out-of-box
-    handling").
+    Flags a frame when its translation magnitude exceeds ``frac`` of the box's
+    smaller side.
     """
     h, w = shape_yx
     thr = frac * min(h, w)
@@ -225,13 +204,13 @@ def register_per_leaf(
     mask: bool = False,
     transformation: str = "affine",
 ) -> list[LeafRegion]:
-    """Register each leaf box's sub-stack independently, in place. SPEC §3 Stage II.
+    """Register each leaf box's sub-stack independently, mutating ``leaf_regions``.
 
-    For each leaf: crop to bbox, build its own reference, estimate per-frame rigid
-    transforms (reusing the whole-frame estimator on the sub-stack), and flag
-    frames whose offset approaches the box margin as low-confidence. ``mask=True``
-    segments the tissue inside each box before estimating, so a generously drawn
-    box (mostly background) still tracks the leaf and not its static surroundings.
+    For each leaf: crop to its bbox, estimate per-frame transforms, store its
+    reference, and flag drift-out frames in ``low_confidence_frames``.
+    reference / mask / transformation: as in ``register_whole_frame``.
+    drift_frac: fraction of the box's smaller side a frame may shift before being
+        flagged low-confidence.
     """
     stack = np.asarray(stack)
     for leaf in leaf_regions:
@@ -248,8 +227,8 @@ def register_per_leaf(
 def apply_per_leaf(stack: np.ndarray, leaf_regions: list[LeafRegion]) -> np.ndarray:
     """Composite stabilized stack: each leaf box replaced by its stabilized sub-stack.
 
-    Pixels outside every leaf box keep their raw values; overlapping boxes are
-    resolved last-box-wins. ROIs inside a box therefore sample stabilized tissue.
+    Pixels outside every box keep their raw values; overlapping boxes are resolved
+    last-box-wins. Requires ``register_per_leaf`` to have run first.
     """
     out = np.array(stack, dtype=float)
     for leaf in leaf_regions:
@@ -262,12 +241,11 @@ def apply_per_leaf(stack: np.ndarray, leaf_regions: list[LeafRegion]) -> np.ndar
 
 
 def apply_transforms(stack: np.ndarray, transforms: list[RigidTransform]) -> np.ndarray:
-    """Warp each frame by its transform to produce a stabilized stack.
+    """Warp each frame by its transform to produce a stabilized float stack.
 
-    Returns a float stack aligned to the registration reference. ``sr.transform``
-    warps by the supplied ``tmat`` (the full estimated matrix, including any
-    scale/shear) irrespective of the model the StackReg was constructed with, so
-    non-rigid estimates are reproduced exactly and the pipeline round-trips.
+    Aligned to the registration reference. Raises ``ValueError`` if ``transforms``
+    and ``stack`` differ in length. Non-rigid estimates (scale/shear) are applied
+    exactly, since warping uses the stored matrix.
     """
     from pystackreg import StackReg
 

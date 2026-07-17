@@ -1,21 +1,16 @@
-"""Publication-grade static figures (matplotlib). SPEC.md §4 (export).
+"""Publication-grade static figures (matplotlib), rendered from ``Session`` arrays.
 
-pyqtgraph drives the *interactive* widgets; for the figures that go into a paper
-we render the same ``Session`` arrays through matplotlib, which gives true vector
-PDF/SVG with embedded, editable fonts and exact column-width sizing — the things
-journals (and bioelectronics journals in particular) check. Keeping this separate
-from the widgets follows the SPEC §2.2 rule that no business logic lives in the UI.
-
-matplotlib is a core dependency but imported lazily here, so ``import caliana``
-stays cheap for headless/GUI use that never renders a paper figure. The four
-entry points mirror the analysis the tool already produces:
+Vector PDF/SVG with embedded, editable fonts and exact column widths for journals.
+matplotlib is imported lazily so ``import caliana`` stays cheap when no figure is
+rendered. Four entry points:
 
     plot_traces            stacked / overlaid ΔF/F traces with event markers
     plot_propagation       cross-ROI onset map + propagation arrow
     plot_roi_overlay       a frame / max-projection with ROI shapes drawn on it
     plot_imaging_electrode imaging trace aligned with an auxiliary electrode signal
 
-Each returns a matplotlib ``Figure``; pass ``save=`` to also write a vector file.
+Each returns a matplotlib ``Figure``; pass ``save=<path>`` to also write a file
+(format inferred from the extension).
 """
 from __future__ import annotations
 
@@ -98,13 +93,9 @@ def _finish(fig, save: Optional[str], dpi: int):
 def _time_axis(session):
     """(x, label) — real seconds if the Timeline is calibrated, else frames.
 
-    The axis follows the current (possibly cropped) traces: it uses the original
-    frame index of each trace column (``Session.trace_frames``), so a cropped
-    window still plots against its true recording frames/seconds and ``x`` always
-    matches the trace length.
-
-    Electrode co-analysis (SPEC §6) will populate ``frame_interval``; until then
-    the model is frames-only, so figures default to a frame axis automatically.
+    Follows the current (possibly cropped) traces via each column's original frame
+    index (``Session.trace_frames``), so ``x`` always matches the trace length and
+    a cropped window plots against its true recording frames/seconds.
     """
     frames = session.trace_frames()
     tl = session.timeline
@@ -156,11 +147,14 @@ def plot_traces(
 ):
     """Per-ROI fluorescence traces.
 
-    stacked=True draws traces vertically offset (the usual physiology layout);
-    stacked=False overlays them on a shared axis with a legend. ``offset`` sets
-    the vertical spacing between stacked traces (auto = ~1.1× the largest range).
-    ``scalebar=True`` removes the boxed y-axis and draws a ΔF/F + time scale bar
-    instead, which reads better for many stacked traces.
+    use_dff: plot ΔF/F (requires ``compute_dff``) rather than raw F.
+    rois: indices to plot (default all).
+    stacked: True draws traces vertically offset (usual physiology layout); False
+        overlays them on a shared axis with a legend.
+    offset: vertical spacing between stacked traces (default ~1.1× the largest
+        range).
+    scalebar: replace the boxed y-axis with a ΔF/F + time scale bar (reads better
+        for many stacked traces).
     """
     import matplotlib.pyplot as plt
 
@@ -243,8 +237,11 @@ def plot_propagation(
     dpi: int = 600,
 ):
     """ROI positions coloured by response onset time, with the fitted propagation
-    direction arrow and a speed annotation. Reads the ``propagation`` analysis
-    result (run ``session.cross_roi_propagation()`` first).
+    arrow and a speed annotation. Requires ``session.cross_roi_propagation()`` to
+    have run first.
+
+    background: draw the max-projection behind the ROIs. arrow: draw the fitted
+    propagation-direction arrow (when a direction was found).
     """
     import matplotlib.pyplot as plt
 
@@ -318,10 +315,14 @@ def plot_roi_overlay(
     save: Optional[str] = None,
     dpi: int = 600,
 ):
-    """A background image with the ROI shapes drawn on top, ROI colours matching
-    the trace/propagation figures. ``frame=None`` uses the max-projection
-    (best for showing where signal occurred); pass an int for a single frame.
-    Leaf-registration boxes are outlined if present.
+    """A background image with the ROI shapes drawn on top (colours matching the
+    trace/propagation figures).
+
+    frame: ``None`` uses the max-projection (best for showing where signal
+        occurred); an int selects a single frame of the working stack.
+    cmap: matplotlib colormap for the background.
+    show_labels / show_leaf_boxes: draw ROI labels / outline leaf-registration
+        boxes if present.
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Circle, Rectangle
@@ -357,7 +358,7 @@ def plot_roi_overlay(
                             textcoords="offset points", color=col, fontsize=6,
                             ha="center", va="bottom")
 
-        # A 50-px scale bar (no physical calibration in this model — SPEC §3).
+        # No physical calibration in this model, so no scale bar is drawn.
         ax.plot([0.05, 0.05], [0, 0], color="w")  # keep autoscale sane
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values():
@@ -368,7 +369,7 @@ def plot_roi_overlay(
 
 
 # --------------------------------------------------------------------------- #
-# 4. Imaging + electrode overlay (SPEC §6 forward-compat)
+# 4. Imaging + electrode overlay
 # --------------------------------------------------------------------------- #
 def plot_imaging_electrode(
     session,
@@ -383,15 +384,16 @@ def plot_imaging_electrode(
     save: Optional[str] = None,
     dpi: int = 600,
 ):
-    """Stack a calcium trace over an auxiliary electrode time-series on a shared
-    real-time x-axis. The electrode signal is passed explicitly (``aux_time`` in
-    seconds, ``aux_signal`` same length) because ``Session`` has no ``aux_signals``
-    slot yet — this is the SPEC §6 forward-compat case; when that slot lands,
-    swap the args for ``session.aux_signals[...]``.
+    """Stack one ROI's calcium trace over an auxiliary electrode signal on a shared
+    time axis.
 
-    The imaging trace needs a real seconds axis to align with the electrode, so
-    set ``session.timeline.frame_interval`` before calling (otherwise it falls
-    back to frame indices, which won't line up with the electrode time base).
+    aux_time: electrode timestamps in seconds. aux_signal: same length as
+        ``aux_time``. roi: index of the ROI to plot. use_dff: plot ΔF/F vs raw F.
+        aux_label: y-axis label for the electrode panel.
+
+    Set ``session.timeline.frame_interval`` first so the imaging trace has a real
+    seconds axis; otherwise it falls back to frame indices, which won't line up
+    with the electrode time base.
     """
     import matplotlib.pyplot as plt
 

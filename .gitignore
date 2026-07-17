@@ -6,11 +6,6 @@ __pycache__/
 build/
 dist/
 
-# Virtual environments
-venv/
-.venv/
-env/
-
 # Packaging / installed metadata
 *.egg
 
@@ -18,16 +13,6 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ipynb_checkpoints/
-
-# Research data — never commit (multi-GB recordings live outside the repo).
-# Anchored to repo root so tests/data/ (the small fixture) is NOT swept up.
-/data/
-/output/
-*.nd2
-# Large TIFF recordings; keep the small synthetic fixture under tests/data/.
-*.tif
-*.tiff
-!tests/data/*.tif
 
 # OS / editor
 .DS_Store

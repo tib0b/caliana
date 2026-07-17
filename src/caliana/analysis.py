@@ -1,15 +1,9 @@
-"""Analyses on ROI traces. SPEC.md §3 Stage III.
+"""Analyses on ROI traces.
 
-Built-ins: ΔF/F, response-onset timing, and cross-ROI propagation.
-Custom analyses are plain Python callables
-``f(traces, data) -> result`` (full trust, no sandbox).
-
-The onset detector (``onset_time``) offers a fraction-of-max and a
-threshold-on-baseline (``base + k·std``) method — the latter mirrors the
-predecessor detector in Pivat/src/core/utils.py. It is the building block for
-``cross_roi_propagation`` (response timing across ROIs). A change-point
-approach (PELT via ``ruptures``, as in the predecessor calcium_onset_detection.py)
-could be added here as a further onset method.
+Built-ins: ΔF/F (``compute_dff``), response-onset timing (``onset_time``,
+``onset_time_map``), and cross-ROI propagation (``cross_roi_propagation``).
+Custom analyses are plain callables ``f(traces, data) -> result`` (full trust,
+no sandbox), run via ``apply_custom``.
 """
 from __future__ import annotations
 
@@ -24,10 +18,11 @@ def compute_dff(
     n: int | None = None,
     region: tuple[int, int] | None = None,
 ) -> Traces:
-    """Compute ΔF/F = (F - F0)/F0 per ROI, storing it on ``traces.dff``. SPEC §3.
+    """Compute ΔF/F = (F - F0)/F0 per ROI, storing it on ``traces.dff``.
 
-    F0 is either the mean of the first ``n`` frames (FIRST_N) or the mean over a
-    user-selected ``region`` ``[start, end)`` (REGION).
+    method: ``BaselineMethod.FIRST_N`` — F0 is the mean of the first ``n`` frames
+        (``n`` required); ``BaselineMethod.REGION`` — F0 is the mean over
+        ``region`` ``[start, end)`` (``region`` required).
     """
     F = traces.raw
     if method == BaselineMethod.FIRST_N:
@@ -54,24 +49,20 @@ def onset_time(
     k: float = 3.0,
     baseline_region: tuple[int, int] | None = None,
 ) -> float:
-    """Frame at which a trace first rises from baseline. SPEC §3 (response timing).
+    """Sub-frame index at which a trace first rises from baseline (NaN if none).
 
-    Robust for step-like sustained responses (unlike peak finding). Returns a
-    sub-frame value via linear interpolation, or NaN if no rise is detected.
+    Robust for step-like sustained responses (unlike peak finding); the crossing is
+    linearly interpolated between frames.
 
-    - ``fraction_of_max``: threshold = baseline + ``frac`` * (max - baseline), for
-      ``frac`` in ``(0, 1]``. ``frac=1`` targets the maximum itself, so the returned
-      frame is the time the trace reaches its peak (time-to-max).
-    - ``std``: threshold = baseline_mean + ``k`` * baseline_std
-      (mirrors the detector in Pivat/src/core/utils.py).
+    method:
+      - ``"fraction_of_max"``: threshold = baseline + ``frac`` * (max - baseline),
+        with ``frac`` in ``(0, 1]``. ``frac=1`` gives time-to-max.
+      - ``"std"``: threshold = baseline_mean + ``k`` * baseline_std.
 
-    The baseline level is estimated over a user-chosen ``baseline_region``
-    ``[start, end)`` when given; otherwise over the first ``baseline_frames``
-    frames, or — failing that — the per-method default (trace min for
-    ``fraction_of_max``, the first 10% of frames for ``std``). When a
-    ``baseline_region`` is given the rise is searched only from its end onward, so
-    the onset cannot fall within or before the baseline window; otherwise the whole
-    trace is searched.
+    Baseline is measured over ``baseline_region`` ``[start, end)`` if given, else
+    the first ``baseline_frames`` frames, else the per-method default (trace min for
+    ``fraction_of_max``, first 10% of frames for ``std``). With ``baseline_region``
+    the rise is searched only from its end onward.
     """
     sig = np.asarray(sig, dtype=float)
     if baseline_region is not None:
@@ -122,20 +113,15 @@ def onset_time_map(
     baseline_region: tuple[int, int] | None = None,
     bin_size: int = 1,
 ) -> np.ndarray:
-    """Per-pixel response-onset time over an image ``stack`` ``[T, Y, X]``. SPEC §3.
+    """Per-pixel ``onset_time`` over a ``[T, Y, X]`` stack → 2D ``[Y, X]`` map.
 
-    Applies the same detector as ``onset_time`` independently to every pixel's
-    temporal trace and returns a 2D ``[Y, X]`` map of onset frames (NaN where no
-    rise is detected), so onset timing can be visualised as a heatmap rather than
-    only per ROI. ``method``/``frac``/``k``/``baseline_frames``/``baseline_region``
-    carry exactly the meaning they have in ``onset_time`` — this is a vectorised
-    equivalent of calling it on each pixel, so a heatmap and a same-parameter ROI
-    onset agree by construction.
+    Applies the same detector to every pixel's temporal trace, returning onset
+    frames (NaN where no rise). ``method``, ``frac``, ``k``, ``baseline_frames``,
+    ``baseline_region`` mean exactly what they do in ``onset_time``.
 
-    ``bin_size`` (``b``) mean-pools the stack into non-overlapping ``b×b`` blocks
-    before detection (e.g. 2 ⇒ 2×2 binning), trading spatial resolution for SNR
-    and speed; the map is then ``[Y // b, X // b]``. Any partial edge block is
-    dropped.
+    bin_size: mean-pool into non-overlapping ``bin_size × bin_size`` blocks first
+        (2 ⇒ 2×2 binning), trading resolution for SNR and speed; the map is then
+        ``[Y // bin_size, X // bin_size]`` and partial edge blocks are dropped.
     """
     stack = np.asarray(stack, dtype=float)
     if stack.ndim != 3:
@@ -210,15 +196,15 @@ def cross_roi_propagation(
     k: float = 3.0,
     baseline_region: tuple[int, int] | None = None,
 ) -> dict:
-    """Estimate signal propagation across ROIs from response timing. SPEC §3.
+    """Estimate signal propagation across ROIs from per-ROI onset timing.
 
-    Detects per-ROI onset times and fits onset = a*x + b*y + c over ROI pixel
-    coordinates. The onset-time gradient is the slowness vector (frames/px), so
-    speed = 1/|gradient| (px/frame) and its unit vector points in the direction
-    of propagation (toward later onset). Units are px/frame (SPEC §3).
+    Detects each ROI's onset (``onset_time``) and fits ``onset = a*x + b*y + c``
+    over ROI centres. Returns a dict with per-ROI ``onsets``, the earliest
+    ``source_roi``, ``speed_px_per_frame``, a ``direction`` unit vector ``(dy, dx)``
+    toward later onset, and ``pairwise`` speeds.
 
-    ``baseline_region`` ``[start, end)``, when given, sets the frame window each
-    ROI's onset baseline is measured over (see ``onset_time``).
+    signal: ``"dff"`` (uses ``traces.dff`` if computed) or ``"raw"``.
+    method / frac / k / baseline_frames / baseline_region: passed to ``onset_time``.
     """
     data = traces.dff if (signal == "dff" and traces.dff is not None) else traces.raw
     n = data.shape[0]
@@ -278,7 +264,7 @@ def cross_roi_propagation(
 
 
 def apply_custom(func, traces: Traces, data: np.ndarray):
-    """Run a user-supplied callable ``f(traces, data) -> result``. SPEC §3.
+    """Run a user-supplied callable ``f(traces, data) -> result``.
 
     Full trust, no sandboxing — intended for notebook use.
     """
