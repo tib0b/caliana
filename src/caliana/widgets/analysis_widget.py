@@ -3,8 +3,13 @@
 Two tabbed pages:
 
 **Trace analysis** — analyses of the ROI traces:
-- Choose the ΔF/F baseline: first-N frames, or drag a window on the trace.
-- Compute ΔF/F and toggle raw / ΔF/F display.
+- ΔF/F defaults to a first-10-frame baseline as soon as traces exist (`Traces`);
+  choose a different baseline (first-N frames, or drag a window on the trace) and
+  recompute, and toggle raw / ΔF/F display.
+- Smooth ΔF/F with a Gaussian kernel of user-chosen σ (frames); the result is
+  kept in its own `traces.smoothed` array — `dff` is never overwritten — and can
+  be toggled on/off independently (`smooth_traces`, `session.smooth_traces` for
+  headless use).
 - Pick one analysis to run; only that analysis' controls are shown:
   - Cross-ROI propagation: choose the onset-time method (fraction_of_max / std) and its
     parameters (frac / k), and drag a baseline window (the green band) that sets
@@ -20,9 +25,9 @@ run on every pixel's temporal trace (optionally after n×n binning), colouring
 each pixel by when it first responds. Method / frac / k / baseline mirror the
 propagation controls, so a heatmap pixel and a same-parameter ROI onset agree.
 
-Interaction logic lives in plain methods (`compute_dff`, `compute_propagation`,
-`compute_onset_heatmap`, `add_event`, `_redraw_traces`) so tests can drive it
-without a mouse.
+Interaction logic lives in plain methods (`compute_dff`, `smooth_traces`,
+`compute_propagation`, `compute_onset_heatmap`, `add_event`, `_redraw_traces`) so
+tests can drive it without a mouse.
 """
 from __future__ import annotations
 
@@ -101,6 +106,30 @@ class AnalysisWidget(QtWidgets.QWidget):
         row1.addWidget(self.interval_box)
         row1.addStretch(1)
         layout.addLayout(row1)
+
+        # Row 1b — Gaussian smoothing. Always smooths ΔF/F (traces.dff, which
+        # defaults to a first-10-frame baseline as soon as traces exist — see
+        # Traces) into traces.smoothed; never touches raw or dff.
+        row1b = QtWidgets.QHBoxLayout()
+        row1b.addWidget(QtWidgets.QLabel("Smoothing σ (frames):"))
+        self.smooth_sigma_box = QtWidgets.QDoubleSpinBox()
+        self.smooth_sigma_box.setRange(0.0, 1000.0)
+        self.smooth_sigma_box.setSingleStep(0.5)
+        self.smooth_sigma_box.setValue(1.0)
+        self.smooth_sigma_box.setToolTip(
+            "Standard deviation of the Gaussian kernel (frames) applied to ΔF/F"
+        )
+        row1b.addWidget(self.smooth_sigma_box)
+
+        self.smooth_btn = QtWidgets.QPushButton("Smooth ΔF/F")
+        self.smooth_btn.clicked.connect(self.smooth_traces)
+        row1b.addWidget(self.smooth_btn)
+
+        self.show_smoothed = QtWidgets.QCheckBox("Show smoothed ΔF/F")
+        self.show_smoothed.toggled.connect(self._redraw_traces)
+        row1b.addWidget(self.show_smoothed)
+        row1b.addStretch(1)
+        layout.addLayout(row1b)
 
         # Row 2 — pick the analysis to run + shared stimulus events.
         row2 = QtWidgets.QHBoxLayout()
@@ -321,10 +350,13 @@ class AnalysisWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------- helpers
     def _display_data(self):
-        """The array currently plotted: ΔF/F if requested & available, else raw."""
+        """The array currently plotted: smoothed, else ΔF/F, else raw — in that
+        priority, each gated on its checkbox and on having been computed."""
         traces = self.session.traces
         if traces is None:
             return None, []
+        if self.show_smoothed.isChecked() and traces.smoothed is not None:
+            return traces.smoothed, traces.labels
         if self.show_dff.isChecked() and traces.dff is not None:
             return traces.dff, traces.labels
         return traces.raw, traces.labels
@@ -374,6 +406,19 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.show_dff.setChecked(True)
         self._redraw_traces()
         self.status.setText(f"ΔF/F computed ({method.value}).")
+
+    def smooth_traces(self):
+        """Gaussian-smooth ΔF/F, storing the result on ``traces.smoothed`` without
+        touching ``dff``. ``traces.dff`` defaults to a first-10-frame baseline as
+        soon as traces are extracted, so this works without first clicking
+        "Compute ΔF/F"."""
+        if self.session.traces is None:
+            self.session.extract_traces()
+        sigma = self.smooth_sigma_box.value()
+        self.session.smooth_traces(sigma)
+        self.show_smoothed.setChecked(True)
+        self._redraw_traces()
+        self.status.setText(f"ΔF/F smoothed (σ={sigma:g} frames).")
 
     def add_event(self, frame: int):
         ev = self.session.timeline.add_event(int(frame))
@@ -585,7 +630,13 @@ class AnalysisWidget(QtWidgets.QWidget):
             curve = self.plot.plot(x, data[i], pen=pg.intColor(i, hues=max(6, n)),
                                    name=labels[i] if i < len(labels) else f"roi_{i}")
             self._curves.append(curve)
-        ylabel = "ΔF/F" if (self.show_dff.isChecked() and self.session.traces.dff is not None) else "mean intensity"
+        traces = self.session.traces
+        if self.show_smoothed.isChecked() and traces.smoothed is not None:
+            ylabel = f"ΔF/F (smoothed, σ={traces.smoothed_sigma:g})"
+        elif self.show_dff.isChecked() and traces.dff is not None:
+            ylabel = "ΔF/F"
+        else:
+            ylabel = "mean intensity"
         self.plot.setLabel("left", ylabel)
 
     def closeEvent(self, event):

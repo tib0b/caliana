@@ -310,7 +310,10 @@ class Session:
         return self
 
     def compute_dff(self, method=BaselineMethod.FIRST_N, n=None, region=None) -> Traces:
-        """Compute ΔF/F on the current traces (extracting them first if needed).
+        """Recompute ΔF/F on the current traces with an explicit baseline,
+        overriding the default (extracting traces first if needed). ``traces.dff``
+        already holds a first-10-frame-baseline ΔF/F as soon as traces are
+        extracted (see ``Traces``); call this to use a different baseline.
 
         method: ``BaselineMethod.FIRST_N`` — F0 = mean of first ``n`` frames;
             ``BaselineMethod.REGION`` — F0 = mean over ``region`` ``[start, end)``.
@@ -318,6 +321,19 @@ class Session:
         if self.traces is None:
             self.extract_traces()
         return analysis.compute_dff(self.traces, method=BaselineMethod(method), n=n, region=region)
+
+    def smooth_traces(self, sigma: float) -> Traces:
+        """Gaussian-smooth the current ΔF/F along time (extracting traces first if
+        needed). See ``analysis.smooth_traces``.
+
+        sigma: standard deviation of the Gaussian kernel, in frames. Always
+            smooths ``traces.dff`` (which defaults to a first-10-frame baseline —
+            see ``Traces``) — never the raw F. The result is stored on
+            ``traces.smoothed`` and never overwrites ``dff``.
+        """
+        if self.traces is None:
+            self.extract_traces()
+        return analysis.smooth_traces(self.traces, sigma)
 
     def cross_roi_propagation(self, **kwargs):
         """Estimate signal propagation across ROIs; stores it under ``analyses``.

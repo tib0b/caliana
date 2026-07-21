@@ -1,9 +1,9 @@
 """Analyses on ROI traces.
 
-Built-ins: ΔF/F (``compute_dff``), response-onset timing (``onset_time``,
-``onset_time_map``), and cross-ROI propagation (``cross_roi_propagation``).
-Custom analyses are plain callables ``f(traces, data) -> result`` (full trust,
-no sandbox), run via ``apply_custom``.
+Built-ins: ΔF/F (``compute_dff``), Gaussian smoothing (``smooth_traces``),
+response-onset timing (``onset_time``, ``onset_time_map``), and cross-ROI
+propagation (``cross_roi_propagation``). Custom analyses are plain callables
+``f(traces, data) -> result`` (full trust, no sandbox), run via ``apply_custom``.
 """
 from __future__ import annotations
 
@@ -38,6 +38,33 @@ def compute_dff(
         raise ValueError(f"Unknown baseline method {method!r}")
 
     traces.dff = (F - F0) / F0
+    return traces
+
+
+def smooth_traces(traces: Traces, sigma: float) -> Traces:
+    """Gaussian-smooth ``traces.dff`` along time, storing the result on
+    ``traces.smoothed``.
+
+    ``sigma`` is the Gaussian kernel's standard deviation, in frames (its variance
+    is ``sigma**2``); larger values smooth more. Always smooths ΔF/F (``dff``
+    defaults to a first-10-frame baseline — see ``Traces``) — never the raw F.
+
+    ``traces.dff`` is left untouched — the smoothed copy lives only in
+    ``traces.smoothed``, alongside ``smoothed_sigma`` recording the σ used.
+    """
+    if sigma < 0:
+        raise ValueError(f"sigma must be >= 0, got {sigma!r}")
+    if traces.dff is None:
+        raise ValueError("dff not available (no traces); call compute_dff() first")
+    source = traces.dff
+
+    if sigma == 0:
+        traces.smoothed = source.copy()
+    else:
+        from scipy.ndimage import gaussian_filter1d
+
+        traces.smoothed = gaussian_filter1d(source, sigma=sigma, axis=1)
+    traces.smoothed_sigma = sigma
     return traces
 
 

@@ -344,6 +344,42 @@ def test_analysis_widget():
     print("analysis widget OK")
 
 
+def test_analysis_widget_smoothing():
+    """Gaussian smoothing always acts on ΔF/F (available by default, no
+    "Compute ΔF/F" click needed) and is stored separately, toggled via its own
+    checkbox; it never overwrites raw or ΔF/F."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    s.add_roi(center=(16, 12), size=4)
+    w = AnalysisWidget(s)
+
+    assert s.traces.dff is not None                     # default first-10-frame baseline
+    dff_before = s.traces.dff.copy()
+    raw_before = s.traces.raw.copy()
+    w.smooth_sigma_box.setValue(1.5)
+    w.smooth_traces()
+
+    assert s.traces.smoothed is not None
+    assert s.traces.smoothed.shape == s.traces.dff.shape
+    assert s.traces.smoothed_sigma == 1.5
+    assert np.array_equal(s.traces.raw, raw_before)     # raw untouched
+    assert np.array_equal(s.traces.dff, dff_before)     # dff untouched
+    assert w.show_smoothed.isChecked()                  # auto-enabled after smoothing
+    data, _ = w._display_data()
+    assert data is s.traces.smoothed
+
+    # Toggling off falls back to raw (the default display).
+    w.show_smoothed.setChecked(False)
+    data, _ = w._display_data()
+    assert data is s.traces.raw
+
+    w.close()
+    print("analysis widget smoothing OK")
+
+
 def test_analysis_widget_analysis_selection():
     """Picking an analysis type shows only that analysis' controls; the onset
     method toggles which propagation parameter is active; and propagation draws
@@ -449,5 +485,6 @@ if __name__ == "__main__":
     test_roi_widget_track_motion()
     test_crop_traces_widget()
     test_analysis_widget()
+    test_analysis_widget_smoothing()
     test_analysis_widget_analysis_selection()
     test_analysis_widget_onset_heatmap()

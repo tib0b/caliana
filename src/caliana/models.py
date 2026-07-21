@@ -113,12 +113,32 @@ class RegistrationResult:
 # --------------------------------------------------------------------------- #
 # Traces & analysis (Stage III)
 # --------------------------------------------------------------------------- #
+# Default ΔF/F baseline window for `Traces.dff`'s auto-computed default value.
+DEFAULT_DFF_BASELINE_FRAMES = 10
+
+
 @dataclass
 class Traces:
-    """Per-ROI fluorescence traces (raw F and optional ΔF/F)."""
+    """Per-ROI fluorescence traces (raw F and ΔF/F).
+
+    ``dff`` defaults to ΔF/F with the first ``DEFAULT_DFF_BASELINE_FRAMES`` frames
+    as baseline, computed automatically from ``raw`` (``None`` only when ``raw`` is
+    empty, e.g. no ROIs). Pass ``dff`` explicitly, or call ``analysis.compute_dff``
+    afterwards, to use a different baseline.
+    """
     raw: np.ndarray                        # [n_roi, T] mean intensity inside each ROI
-    dff: Optional[np.ndarray] = None       # [n_roi, T] (F - F0)/F0; None until compute_dff
+    dff: Optional[np.ndarray] = None       # [n_roi, T] (F - F0)/F0
     labels: list[str] = field(default_factory=list)
+    # Gaussian-smoothed copy of `dff` (see `analysis.smooth_traces`), kept separate
+    # so `dff` is never overwritten. None until smoothed.
+    smoothed: Optional[np.ndarray] = None            # [n_roi, T]
+    smoothed_sigma: Optional[float] = None           # Gaussian std dev used, in frames
+
+    def __post_init__(self):
+        if self.dff is None and self.raw.size:
+            n = min(DEFAULT_DFF_BASELINE_FRAMES, self.raw.shape[1])
+            f0 = self.raw[:, :n].mean(axis=1, keepdims=True)
+            self.dff = (self.raw - f0) / f0
 
 
 class BaselineMethod(str, Enum):
