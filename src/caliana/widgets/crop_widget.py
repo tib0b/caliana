@@ -18,7 +18,7 @@ import pyqtgraph as pg
 
 from .. import roi as roi_mod
 from ._plot import FrameTimeAxis
-from ._qt import get_qt
+from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
 
@@ -81,6 +81,11 @@ class CropTracesWidget(QtWidgets.QWidget):
         self.reset_btn.setToolTip("Clear the crop and use the whole recording")
         self.reset_btn.clicked.connect(self.reset_crop)
         bar.addWidget(self.reset_btn)
+
+        self.save_btn = QtWidgets.QPushButton("Save traces…")
+        self.save_btn.setToolTip("Save the ROI mean-intensity traces as a figure")
+        self.save_btn.clicked.connect(self._save_traces)
+        bar.addWidget(self.save_btn)
 
         bar.addStretch(1)
         self.status = QtWidgets.QLabel("")
@@ -183,6 +188,38 @@ class CropTracesWidget(QtWidgets.QWidget):
         self.result = self.session.set_crop(None, None)
         self.status.setText("Crop cleared (whole recording).")
         return self.result
+
+    # -------------------------------------------------------------- saving
+    def _save_traces(self):
+        """Export the preview traces as shown (WYSIWYG), with the crop window.
+
+        Mirrors the panel: raw or ΔF/F preview per the checkbox, the shaded crop
+        window, and the frames/seconds x-axis — restyled with a cleaner palette.
+        """
+        data, ylabel = self._preview_data()
+        if data.shape[0] == 0:
+            self.status.setText("No ROIs to plot.")
+            return
+        iv = self._frame_interval()
+        scale = iv or 1
+        x = np.arange(data.shape[1]) * scale
+        xlabel = "time (s)" if iv else "frame"
+        lo, hi = self.region.getRegion()
+        regions = [(lo * scale, hi * scale, "#0072B2")]
+        labels = list(self._preview.labels)
+
+        def render(path):
+            from .. import figures
+
+            fig = figures.export_traces(
+                [data[i] for i in range(data.shape[0])], x=x, xlabel=xlabel,
+                ylabel=ylabel, labels=labels, regions=regions, save=path,
+            )
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+        save_figure_dialog(self, render, title="Save traces", status=self.status)
 
     def closeEvent(self, event):
         self.closed.emit()

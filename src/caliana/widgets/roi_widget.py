@@ -26,7 +26,7 @@ from ..models import RegistrationMode, ROIShape
 from ..registration import map_point
 from ..roi import polygon_centroid
 from ._plot import FrameTimeAxis
-from ._qt import get_qt
+from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
 
@@ -100,6 +100,18 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         )
         self.track_box.toggled.connect(self._on_track_toggled)
         bar.addWidget(self.track_box)
+
+        # Export the ROI overlay (first frame) and the mean-intensity traces as
+        # paper-grade static figures via figures.py.
+        self.save_overlay_btn = QtWidgets.QPushButton("Save overlay…")
+        self.save_overlay_btn.setToolTip("Save the first frame with ROI outlines as a figure")
+        self.save_overlay_btn.clicked.connect(self._save_overlay)
+        bar.addWidget(self.save_overlay_btn)
+
+        self.save_traces_btn = QtWidgets.QPushButton("Save traces…")
+        self.save_traces_btn.setToolTip("Save the ROI mean-intensity traces as a figure")
+        self.save_traces_btn.clicked.connect(self._save_traces)
+        bar.addWidget(self.save_traces_btn)
 
         bar.addStretch(1)
         self.hint = QtWidgets.QLabel("Click the image to place an ROI")
@@ -473,6 +485,95 @@ class RoiSelectionWidget(QtWidgets.QWidget):
             dff = (raw - f0) / f0 if f0 else np.zeros_like(raw)
             self.trace_plot.plot(dff, pen=pg.intColor(i, hues=max(6, n)),
                                  name=traces.labels[i])
+
+    # -------------------------------------------------------------- saving
+    def _overlay_specs(self, frame):
+        """ROI + leaf overlay specs at ``frame`` (tracked positions if tracking).
+
+        Colours use the Okabe-Ito palette so an ROI matches its trace colour in
+        the exported traces figure.
+        """
+        from .. import figures
+
+        labels = self.session.traces.labels if self.session.traces else None
+        specs = []
+        for i, roi in enumerate(self.session.rois):
+            color = figures.roi_color(i)
+            label = (labels[i] if labels and i < len(labels)
+                     else roi.label or str(i))
+            if roi.shape == ROIShape.POLYGON:
+                verts = self._roi_raw_vertices(roi, frame) if self._tracking else roi.vertices
+                specs.append({"kind": "polygon", "vertices": verts,
+                              "center": polygon_centroid(verts), "size": 0,
+                              "color": color, "label": label})
+            else:
+                cy, cx = self._roi_raw_center(roi, frame) if self._tracking else roi.center
+                specs.append({"kind": "circle" if roi.shape == ROIShape.CIRCLE else "rect",
+                              "center": (cy, cx), "size": roi.size,
+                              "color": color, "label": label})
+        for i, leaf in enumerate(self.session.leaf_regions):
+            y0, _y1, x0, _x1 = leaf.bbox
+            specs.append({"kind": "bbox", "bbox": leaf.bbox, "center": (y0, x0),
+                          "size": 0, "color": "#E69F00", "lw": 0.6, "ls": "--",
+                          "label": leaf.label or f"leaf {i}"})
+        return specs
+
+    def _save_overlay(self):
+        """Export the ROI overlay on the current frame as shown (WYSIWYG, clean).
+
+        Uses the frame you're viewing and the view's current contrast; ROI
+        shapes/labels are drawn in the Okabe-Ito palette.
+        """
+        if self.session.data is None:
+            self.hint.setText("No data loaded.")
+            return
+        frame = int(self.image.currentIndex)
+        stack = np.asarray(self.session.data if self._tracking
+                           else self.session._working_stack())
+        image = stack[frame]
+        levels = self.image.getLevels()
+        overlays = self._overlay_specs(frame)
+
+        def render(path):
+            from .. import figures
+
+            fig = figures.export_image(image, levels=levels, cmap="gray",
+                                       overlays=overlays, save=path)
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+        save_figure_dialog(self, render, title="Save ROI overlay", status=self.hint)
+
+    def _save_traces(self):
+        """Export the live ΔF/F₀ trace panel as shown (WYSIWYG, clean palette).
+
+        Reproduces the panel's display-only normalization ((F − F[0]) / F[0]);
+        the stored/exported traces themselves remain raw mean intensity (SPEC §3).
+        """
+        if not self.session.rois:
+            self.hint.setText("Place an ROI first.")
+            return
+        traces = self.session.extract_traces()
+        dff0 = []
+        for raw in traces.raw:
+            f0 = float(raw[0])
+            dff0.append((raw - f0) / f0 if f0 else np.zeros_like(raw))
+        tl = self.session.timeline
+        iv = tl.frame_interval if (tl is not None and tl.frame_interval) else None
+        x = np.arange(traces.raw.shape[1]) * (iv or 1)
+        xlabel = "time (s)" if iv else "frame"
+
+        def render(path):
+            from .. import figures
+
+            fig = figures.export_traces(dff0, x=x, xlabel=xlabel, ylabel="ΔF/F₀",
+                                        labels=list(traces.labels), save=path)
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+        save_figure_dialog(self, render, title="Save ROI traces", status=self.hint)
 
     # -------------------------------------------------------------- events
     def _on_scene_click(self, ev):

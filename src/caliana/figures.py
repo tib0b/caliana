@@ -1,17 +1,5 @@
-"""Publication-grade static figures (matplotlib), rendered from ``Session`` arrays.
+# Publication-grade static figures (matplotlib), rendered from ``Session`` arrays.
 
-Vector PDF/SVG with embedded, editable fonts and exact column widths for journals.
-matplotlib is imported lazily so ``import caliana`` stays cheap when no figure is
-rendered. Four entry points:
-
-    plot_traces            stacked / overlaid ΔF/F traces with event markers
-    plot_propagation       cross-ROI onset map + propagation arrow
-    plot_roi_overlay       a frame / max-projection with ROI shapes drawn on it
-    plot_imaging_electrode imaging trace aligned with an auxiliary electrode signal
-
-Each returns a matplotlib ``Figure``; pass ``save=<path>`` to also write a file
-(format inferred from the extension).
-"""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -21,8 +9,8 @@ import numpy as np
 
 from .models import ROIShape
 
-# Okabe-Ito colourblind-safe palette (the de-facto standard for physiology
-# figures). Shared by every figure function so an ROI is the same colour in the
+# Okabe-Ito colourblind-safe palette
+# Shared by every figure function so an ROI is the same colour in the
 # overlay panel, its trace, and the propagation map — the figures stay
 # cross-readable, which matters more in print than matching the interactive
 # pyqtgraph HSV colours (pg.intColor) used live in the widgets.
@@ -46,6 +34,24 @@ COL_DOUBLE = 7.2
 def roi_color(i: int) -> str:
     """Stable per-ROI colour, cycled through the palette."""
     return ROI_COLORS[i % len(ROI_COLORS)]
+
+
+def intensity_levels(image, pmax: float = 99.0):
+    """Display range ``(min, pmax-th percentile)`` of an image's intensities.
+
+    Anchoring the low end at the data minimum and clipping the high end at the
+    ``pmax``-th percentile keeps a handful of outlier-bright pixels from
+    flattening the contrast across the rest of the image. Falls back to the full
+    range for near-flat images where that top percentile equals the minimum. This
+    is the same scale the interactive preview/ROI widgets default to, shared here
+    so a saved figure matches what was on screen.
+    """
+    image = np.asarray(image)
+    lo = float(np.min(image))
+    hi = float(np.percentile(image, pmax))
+    if hi <= lo:
+        hi = lo + 1.0
+    return lo, hi
 
 
 @contextmanager
@@ -129,298 +135,174 @@ def _event_overlay(ax, session, x):
                 )
 
 
-# --------------------------------------------------------------------------- #
-# 1. ΔF/F traces (single or stacked)
-# --------------------------------------------------------------------------- #
-def plot_traces(
-    session,
-    *,
-    use_dff: bool = True,
-    stacked: bool = True,
-    offset: Optional[float] = None,
-    rois: Optional[Sequence[int]] = None,
-    width: float = COL_SINGLE,
-    height: Optional[float] = None,
-    scalebar: bool = False,
-    save: Optional[str] = None,
-    dpi: int = 600,
-):
-    """Per-ROI fluorescence traces.
+# Clean matplotlib renderings that mirror the live pyqtgraph views — same data,
+# overlays, and which-series-shown — restyled with the paper rcParams and the
+# Okabe-Ito palette.
 
-    use_dff: plot ΔF/F (requires ``compute_dff``) rather than raw F.
-    rois: indices to plot (default all).
-    stacked: True draws traces vertically offset (usual physiology layout); False
-        overlays them on a shared axis with a legend.
-    offset: vertical spacing between stacked traces (default ~1.1× the largest
-        range).
-    scalebar: replace the boxed y-axis with a ΔF/F + time scale bar (reads better
-        for many stacked traces).
+def _draw_overlay(ax, ov):
+    """Draw one ROI/leaf overlay spec onto an image axis (see ``export_image``).
+
+    ``ov`` is a dict with ``kind`` in {circle, rect, bbox, polygon}, a ``center``
+    (y, x), a ``size`` (radius, px), optional ``bbox``/``vertices`` for the box
+    and polygon kinds, and styling (``color``/``lw``/``ls``/``label``). Labels go
+    in a top-right legend (``_overlay_legend``), not next to each shape — in-place
+    labels collide as soon as ROIs sit close together.
+    """
+    from matplotlib.patches import Circle, Polygon, Rectangle
+
+    color = ov.get("color", "white")
+    lw = ov.get("lw", 0.8)
+    ls = ov.get("ls", "-")
+    kind = ov["kind"]
+    if kind == "circle":
+        cy, cx = ov["center"]
+        ax.add_patch(Circle((cx, cy), ov["size"], fill=False, edgecolor=color, lw=lw, ls=ls))
+    elif kind == "rect":
+        cy, cx = ov["center"]
+        r = ov["size"]
+        ax.add_patch(Rectangle((cx - r, cy - r), 2 * r, 2 * r, fill=False,
+                               edgecolor=color, lw=lw, ls=ls))
+    elif kind == "bbox":
+        y0, y1, x0, x1 = ov["bbox"]
+        ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
+                               edgecolor=color, lw=lw, ls=ls))
+    elif kind == "polygon":
+        ax.add_patch(Polygon([(x, y) for (y, x) in ov["vertices"]], closed=True,
+                             fill=False, edgecolor=color, lw=lw, ls=ls))
+
+
+def _overlay_legend(ax, overlays):
+    """One legend entry per labelled overlay, stacked in the top-right corner.
+
+    Each entry is just the label text in its overlay's colour — the line swatch
+    is suppressed (``handlelength=0``), since the text colour already carries the
+    mapping and dropping it keeps the legend compact over the image.
+    """
+    from matplotlib.lines import Line2D
+
+    handles = [Line2D([], [], color=ov.get("color", "white"), lw=1.0,
+                      label=ov["label"]) for ov in overlays]
+    leg = ax.legend(handles=handles, loc="upper right", ncol=1, frameon=False,
+                    handlelength=0, handletextpad=0)
+    for text, ov in zip(leg.get_texts(), overlays):
+        text.set_color(ov.get("color", "white"))
+
+
+
+
+def export_image(image, *, levels=None, cmap="gray", cbar_label=None,
+                 overlays=None, title=None, width=COL_SINGLE, height=None,
+                 save=None, dpi=600):
+    """Clean render of a 2D image the way a pyqtgraph ImageView shows it.
+
+    levels: ``(vmin, vmax)`` contrast pair (e.g. the view's current histogram
+        levels); ``None`` autoscales. cmap: matplotlib colormap matching the
+        view's gradient. cbar_label: draw a colourbar with this label if given.
+    overlays: ROI/leaf shape specs drawn on top (see ``_draw_overlay``); their
+        labels go in a legend above the axes. NaN pixels render transparent, as
+        in the live view.
     """
     import matplotlib.pyplot as plt
 
-    if session.traces is None:
-        raise RuntimeError("No traces; call extract_traces()/compute_dff() first.")
-    tr = session.traces
-    data = tr.dff if (use_dff and tr.dff is not None) else tr.raw
-    if use_dff and tr.dff is None:
-        raise RuntimeError("ΔF/F requested but not computed; call compute_dff().")
-    ylabel = "ΔF/F" if (use_dff and tr.dff is not None) else "F (a.u.)"
-
-    idx = list(rois) if rois is not None else list(range(data.shape[0]))
-    labels = tr.labels or [f"ROI {i}" for i in range(data.shape[0])]
-    x, xlabel = _time_axis(session)
-
-    with paper_style():
-        h = height if height is not None else (0.5 * len(idx) + 0.8 if stacked else 2.0)
-        fig, ax = plt.subplots(figsize=(width, h))
-
-        if stacked:
-            step = offset if offset is not None else 1.1 * max(
-                float(np.ptp(data[i])) for i in idx
-            ) or 1.0
-            yticks, yticklabels = [], []
-            for row, i in enumerate(idx):
-                base = row * step
-                ax.plot(x, data[i] + base, color=roi_color(i), lw=1.0)
-                yticks.append(base)
-                yticklabels.append(labels[i])
-            ax.set_yticks(yticks)
-            ax.set_yticklabels(yticklabels)
-            if scalebar:
-                _trace_scalebar(ax, x, step, ylabel)
-            else:
-                ax.set_ylabel(ylabel)
-        else:
-            for i in idx:
-                ax.plot(x, data[i], color=roi_color(i), lw=1.0, label=labels[i])
-            ax.set_ylabel(ylabel)
-            ax.legend(frameon=False, loc="upper right", ncol=1)
-
-        ax.set_xlabel(xlabel)
-        ax.margins(x=0)
-        _event_overlay(ax, session, x)
-        fig.tight_layout()
-    return _finish(fig, save, dpi)
-
-
-def _trace_scalebar(ax, x, dff_span, ylabel):
-    """Replace the y-axis with a corner ΔF/F + time scale bar."""
-    ax.set_yticks([])
-    for s in ("left", "bottom"):
-        ax.spines[s].set_visible(False)
-    ax.set_xticks([])
-    # vertical bar = one stacked offset of ΔF/F; horizontal bar = ~10% of span.
-    x0 = x[0]
-    xspan = (x[-1] - x[0]) * 0.1
-    y0 = ax.get_ylim()[0]
-    ax.plot([x0, x0], [y0, y0 + dff_span], color="k", lw=1.2, clip_on=False)
-    ax.plot([x0, x0 + xspan], [y0, y0], color="k", lw=1.2, clip_on=False)
-    ax.annotate(f"{dff_span:.2g} {ylabel}", xy=(x0, y0 + dff_span / 2),
-                xytext=(-4, 0), textcoords="offset points",
-                rotation=90, va="center", ha="right", fontsize=6)
-    ax.annotate(f"{xspan:.2g}", xy=(x0 + xspan / 2, y0),
-                xytext=(0, -4), textcoords="offset points",
-                va="top", ha="center", fontsize=6)
-
-
-# --------------------------------------------------------------------------- #
-# 2. Cross-ROI propagation
-# --------------------------------------------------------------------------- #
-def plot_propagation(
-    session,
-    *,
-    background: bool = True,
-    arrow: bool = True,
-    width: float = COL_SINGLE,
-    height: Optional[float] = None,
-    save: Optional[str] = None,
-    dpi: int = 600,
-):
-    """ROI positions coloured by response onset time, with the fitted propagation
-    arrow and a speed annotation. Requires ``session.cross_roi_propagation()`` to
-    have run first.
-
-    background: draw the max-projection behind the ROIs. arrow: draw the fitted
-    propagation-direction arrow (when a direction was found).
-    """
-    import matplotlib.pyplot as plt
-
-    res = session.analyses.get("propagation")
-    if res is None:
-        raise RuntimeError("No propagation result; call cross_roi_propagation().")
-    onsets = np.asarray(res["onsets"], dtype=float)
-    coords = np.array([r.center for r in session.rois], dtype=float)  # (y, x)
-
-    with paper_style():
-        h = height if height is not None else width
-        fig, ax = plt.subplots(figsize=(width, h), layout="constrained")
-
-        if background and session.data is not None:
-            ax.imshow(session.max_projection(), cmap="gray", origin="upper")
-
-        valid = ~np.isnan(onsets)
-        sc = ax.scatter(
-            coords[valid, 1], coords[valid, 0],
-            c=onsets[valid], cmap="viridis", s=60,
-            edgecolors="white", linewidths=0.8, zorder=3,
-        )
-        # ROIs whose onset couldn't be detected: open grey markers.
-        if (~valid).any():
-            ax.scatter(coords[~valid, 1], coords[~valid, 0], facecolors="none",
-                       edgecolors="0.6", s=60, linewidths=0.8, zorder=3)
-
-        src = res.get("source_roi")
-        if src is not None:
-            ax.scatter(coords[src, 1], coords[src, 0], marker="*", s=160,
-                       facecolor="none", edgecolor="red", linewidths=1.2, zorder=4)
-
-        if arrow and res.get("direction") is not None:
-            dy, dx = res["direction"]
-            cy, cx = coords[valid].mean(axis=0)
-            L = 0.25 * max(session.data.shape[1:]) if session.data is not None else 30
-            ax.annotate("", xy=(cx + dx * L, cy + dy * L), xytext=(cx, cy),
-                        arrowprops=dict(arrowstyle="-|>", color="red", lw=1.5))
-
-        speed = res.get("speed_px_per_frame")
-        if speed is not None and np.isfinite(speed):
-            unit = "px/frame"
-            tl = session.timeline
-            if tl is not None and tl.frame_interval:
-                speed = speed / tl.frame_interval  # px/frame -> px/s
-                unit = "px/s"
-            ax.set_title(f"propagation speed ≈ {speed:.2g} {unit}")
-
-        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        cb.set_label("onset (frame)" if (session.timeline is None or not
-                     session.timeline.frame_interval) else "onset (s)")
-        cb.outline.set_linewidth(0.6)
-        ax.set_xlabel("x (px)")
-        ax.set_ylabel("y (px)")
-        ax.set_aspect("equal")
-    return _finish(fig, save, dpi)
-
-
-# --------------------------------------------------------------------------- #
-# 3. Image + ROI overlay
-# --------------------------------------------------------------------------- #
-def plot_roi_overlay(
-    session,
-    *,
-    frame: Optional[int] = None,
-    cmap: str = "gray",
-    show_labels: bool = True,
-    show_leaf_boxes: bool = True,
-    width: float = COL_SINGLE,
-    height: Optional[float] = None,
-    save: Optional[str] = None,
-    dpi: int = 600,
-):
-    """A background image with the ROI shapes drawn on top (colours matching the
-    trace/propagation figures).
-
-    frame: ``None`` uses the max-projection (best for showing where signal
-        occurred); an int selects a single frame of the working stack.
-    cmap: matplotlib colormap for the background.
-    show_labels / show_leaf_boxes: draw ROI labels / outline leaf-registration
-        boxes if present.
-    """
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, Rectangle
-
-    if session.data is None:
-        raise RuntimeError("No data loaded.")
-    img = session.max_projection() if frame is None else session._working_stack()[frame]
-
+    image = np.asarray(image, dtype=float)
+    lo, hi = levels if levels is not None else (None, None)
     with paper_style():
         h = height if height is not None else width
         fig, ax = plt.subplots(figsize=(width, h))
-        ax.imshow(img, cmap=cmap, origin="upper")
-
-        if show_leaf_boxes:
-            for lr in session.leaf_regions:
-                y0, y1, x0, x1 = lr.bbox
-                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False,
-                                       edgecolor="white", lw=0.8, ls="--"))
-
-        labels = (session.traces.labels if session.traces else None) or [
-            r.label or f"ROI {i}" for i, r in enumerate(session.rois)
-        ]
-        for i, r in enumerate(session.rois):
-            cy, cx = r.center
-            col = roi_color(i)
-            if r.shape == ROIShape.CIRCLE:
-                ax.add_patch(Circle((cx, cy), r.size, fill=False, edgecolor=col, lw=1.2))
-            else:
-                ax.add_patch(Rectangle((cx - r.size, cy - r.size), 2 * r.size,
-                                       2 * r.size, fill=False, edgecolor=col, lw=1.2))
-            if show_labels:
-                ax.annotate(labels[i], xy=(cx, cy - r.size), xytext=(0, 2),
-                            textcoords="offset points", color=col, fontsize=6,
-                            ha="center", va="bottom")
-
-        # No physical calibration in this model, so no scale bar is drawn.
-        ax.plot([0.05, 0.05], [0, 0], color="w")  # keep autoscale sane
+        im = ax.imshow(image, cmap=cmap, origin="upper", vmin=lo, vmax=hi)
+        for ov in overlays or []:
+            _draw_overlay(ax, ov)
+        if cbar_label is not None:
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cb.set_label(cbar_label)
+            cb.outline.set_linewidth(0.6)
+        if title:
+            ax.set_title(title)
         ax.set_xticks([]); ax.set_yticks([])
         for s in ax.spines.values():
             s.set_visible(False)
         ax.set_aspect("equal")
         fig.tight_layout()
+        labelled = [ov for ov in overlays or [] if ov.get("label")]
+        if labelled:
+            _overlay_legend(ax, labelled)
     return _finish(fig, save, dpi)
 
 
-# --------------------------------------------------------------------------- #
-# 4. Imaging + electrode overlay
-# --------------------------------------------------------------------------- #
-def plot_imaging_electrode(
-    session,
-    aux_time: np.ndarray,
-    aux_signal: np.ndarray,
-    *,
-    roi: int = 0,
-    use_dff: bool = True,
-    aux_label: str = "Electrode (mV)",
-    width: float = COL_SINGLE,
-    height: float = 2.6,
-    save: Optional[str] = None,
-    dpi: int = 600,
-):
-    """Stack one ROI's calcium trace over an auxiliary electrode signal on a shared
-    time axis.
+def export_traces(traces, *, x=None, xlabel="frame", ylabel="", labels=None,
+                  events=None, regions=None, onsets=None, legend=True,
+                  title=None, width=COL_DOUBLE, height=2.6, save=None, dpi=600):
+    """Clean render of overlaid line traces as a pyqtgraph PlotWidget shows them.
 
-    aux_time: electrode timestamps in seconds. aux_signal: same length as
-        ``aux_time``. roi: index of the ROI to plot. use_dff: plot ΔF/F vs raw F.
-        aux_label: y-axis label for the electrode panel.
-
-    Set ``session.timeline.frame_interval`` first so the imaging trace has a real
-    seconds axis; otherwise it falls back to frame indices, which won't line up
-    with the electrode time base.
+    traces: iterable of 1D arrays (or a 2D ``[n, T]`` array). x: shared x values
+        (frames or seconds); defaults to ``range``. events: ``(x, label)``
+        vertical stimulus markers. regions: ``(lo, hi[, color])`` shaded bands
+        (baseline / crop windows). onsets: per-trace onset x positions (dashed,
+        coloured to match each trace; ``None``/NaN entries are skipped). Series
+        colours use the Okabe-Ito palette, so ROI *i* matches the overlay and
+        propagation figures.
     """
     import matplotlib.pyplot as plt
 
-    if session.traces is None:
-        raise RuntimeError("No traces; call extract_traces()/compute_dff() first.")
-    tr = session.traces
-    y = (tr.dff if (use_dff and tr.dff is not None) else tr.raw)[roi]
-    ylabel = "ΔF/F" if (use_dff and tr.dff is not None) else "F (a.u.)"
-    x, xlabel = _time_axis(session)
-    label = (tr.labels[roi] if tr.labels else f"ROI {roi}")
-
+    data = [np.asarray(t) for t in traces]
+    n = len(data)
+    if x is None:
+        x = np.arange(len(data[0])) if n else np.arange(0)
+    labels = labels or [f"ROI {i}" for i in range(n)]
     with paper_style():
-        fig, (ax_im, ax_el) = plt.subplots(
-            2, 1, figsize=(width, height), sharex=True,
-            gridspec_kw={"hspace": 0.12},
-        )
-        ax_im.plot(x, y, color=roi_color(roi), lw=1.0)
-        ax_im.set_ylabel(f"{label}\n{ylabel}")
-        ax_im.margins(x=0)
+        fig, ax = plt.subplots(figsize=(width, height))
+        for lo, hi, *rest in (regions or []):
+            ax.axvspan(lo, hi, color=(rest[0] if rest else "0.6"),
+                       alpha=0.18, lw=0, zorder=0)
+        for i, y in enumerate(data):
+            ax.plot(x, y, color=roi_color(i), lw=1.0,
+                    label=labels[i] if i < len(labels) else f"ROI {i}")
+        for i, ox in enumerate(onsets or []):
+            if ox is None or (isinstance(ox, float) and np.isnan(ox)):
+                continue
+            ax.axvline(ox, color=roi_color(i), lw=0.8, ls="--", zorder=1)
+        for ex, elabel in (events or []):
+            ax.axvline(ex, color="0.4", lw=0.7, ls="--", zorder=0)
+            if elabel:
+                ax.annotate(elabel, xy=(ex, 1.0), xycoords=("data", "axes fraction"),
+                            xytext=(2, -2), textcoords="offset points",
+                            fontsize=6, color="0.4", va="top")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.margins(x=0)
+        if legend and n:
+            ax.legend(frameon=False, loc="upper right", ncol=1)
+        if title:
+            ax.set_title(title)
+        fig.tight_layout()
+    return _finish(fig, save, dpi)
 
-        ax_el.plot(aux_time, aux_signal, color="0.15", lw=0.8)
-        ax_el.set_ylabel(aux_label)
-        ax_el.set_xlabel(xlabel if xlabel == "Time (s)" else "Time (s)  [set frame_interval]")
-        ax_el.margins(x=0)
 
-        _event_overlay(ax_im, session, x)
-        _event_overlay(ax_el, session, x)
-        fig.align_ylabels([ax_im, ax_el])
+def export_scatter(x, y, *, xlabel, ylabel, point_labels=None, fit=None,
+                   title=None, width=COL_SINGLE, height=None, save=None, dpi=600):
+    """Clean render of the propagation distance-vs-onset-delay scatter.
+
+    x, y: point coordinates. point_labels: per-point text (ROI labels). fit:
+        optional ``(x_pair, y_pair, label)`` line drawn through the points.
+    """
+    import matplotlib.pyplot as plt
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    with paper_style():
+        h = height if height is not None else width
+        fig, ax = plt.subplots(figsize=(width, h))
+        ax.scatter(x, y, s=28, color=ROI_COLORS[0], zorder=3)
+        for xi, yi, lab in zip(x, y, point_labels or []):
+            ax.annotate(lab, xy=(xi, yi), xytext=(3, 3), textcoords="offset points",
+                        fontsize=6, color="0.4")
+        if fit is not None:
+            fx, fy, flabel = fit
+            ax.plot(fx, fy, color=ROI_COLORS[1], lw=1.5, label=flabel)
+            ax.legend(frameon=False, loc="best")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if title:
+            ax.set_title(title)
         fig.tight_layout()
     return _finish(fig, save, dpi)

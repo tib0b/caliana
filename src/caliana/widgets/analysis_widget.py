@@ -36,7 +36,7 @@ import pyqtgraph as pg
 
 from ..models import BaselineMethod
 from ._plot import FrameTimeAxis
-from ._qt import get_qt
+from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
 
@@ -54,6 +54,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._curves: list = []
         self._event_lines: list = []
         self._onset_lines: list = []
+        self._prop_fit: dict | None = None   # snapshot of the last propagation scatter
 
         self._build_ui()
         self._load_session()
@@ -150,6 +151,10 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.event_btn.clicked.connect(lambda: self.add_event(self.event_box.value()))
         row2.addWidget(self.event_btn)
         row2.addStretch(1)
+        self.save_traces_btn = QtWidgets.QPushButton("Save traces…")
+        self.save_traces_btn.setToolTip("Save the ROI traces (raw or ΔF/F, matching the display) as a figure")
+        self.save_traces_btn.clicked.connect(self._save_traces)
+        row2.addWidget(self.save_traces_btn)
         layout.addLayout(row2)
 
         # Row 3 — controls specific to the chosen analysis (empty until picked).
@@ -314,6 +319,12 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.prop_btn = QtWidgets.QPushButton("Propagation")
         self.prop_btn.clicked.connect(self.compute_propagation)
         row.addWidget(self.prop_btn)
+
+        self.save_prop_btn = QtWidgets.QPushButton("Save propagation…")
+        self.save_prop_btn.setToolTip("Save the distance-vs-onset-delay graph as shown")
+        self.save_prop_btn.clicked.connect(self._save_propagation)
+        row.addWidget(self.save_prop_btn)
+
         row.addStretch(1)
         self._on_onset_method_changed(self.onset_method_box.currentText())
         return panel
@@ -538,6 +549,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.prop_plot.clear()
         src = result["source_roi"]
         if src is None:
+            self._prop_fit = None
             return
         onsets = np.asarray(result["onsets"], dtype=float)
         coords = np.array([r.center for r in self.session.rois], dtype=float)  # (y, x)
@@ -575,15 +587,30 @@ class AnalysisWidget(QtWidgets.QWidget):
         # Line for the reported speed: distance = speed · delay, through the origin
         # (the source), so its slope reads back as exactly the summary's speed. R²
         # measures how well that line matches the (noisy) onset delays.
+        fit = None
         if coherent and delay.size >= 1:
             delay_hat = (r / speed) * scale             # delay a perfect wave predicts
             ss_res = float(np.sum((delay - delay_hat) ** 2))
             ss_tot = float(np.sum((delay - delay.mean()) ** 2))
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
             dline = np.array([min(0.0, float(delay.min())), max(0.0, float(delay.max()))])
+            fit = (dline, (speed / scale) * dline,
+                   f"{self._speed_str(speed)} (R²={r2:.3f})")
             self.prop_plot.plot(dline, (speed / scale) * dline,
-                                pen=pg.mkPen("#ff5050", width=2),
-                                name=f"{self._speed_str(speed)} (R²={r2:.3f})")
+                                pen=pg.mkPen("#ff5050", width=2), name=fit[2])
+
+        # Snapshot the scatter for a clean WYSIWYG export (see _save_propagation).
+        self._prop_fit = {
+            "delay": np.asarray(delay, dtype=float),
+            "dist": np.asarray(r, dtype=float),
+            "labels": [labels[i] if i < len(labels) else f"roi_{i}"
+                       for i in np.flatnonzero(valid)],
+            "xlabel": "onset delay (s)" if iv else "onset delay (frame)",
+            "ylabel": ("distance along propagation (px)" if coherent
+                       else "distance from source (px)"),
+            "fit": fit,
+            "title": "Distance vs onset delay",
+        }
 
         # Autorange so every point (and its label) stays in frame.
         self.prop_plot.getViewBox().autoRange(padding=0.12)
@@ -638,6 +665,84 @@ class AnalysisWidget(QtWidgets.QWidget):
         else:
             ylabel = "mean intensity"
         self.plot.setLabel("left", ylabel)
+
+    # -------------------------------------------------------------- saving
+    def _save_traces(self):
+        """Export the trace plot as shown (WYSIWYG): the displayed signal plus the
+        visible events, baseline band(s), and onset markers, cleanly restyled.
+
+        Mirrors the currently displayed signal (raw / ΔF/F / smoothed), the
+        stimulus event lines, whichever baseline window is on the plot, and the
+        per-ROI onset markers when propagation onsets are overlaid.
+        """
+        data, labels = self._display_data()
+        if data is None or data.shape[0] == 0:
+            self.status.setText("No traces to save.")
+            return
+        start = self._crop_start()
+        iv = self._frame_interval()
+        scale = iv or 1
+        x = (start + np.arange(data.shape[1])) * scale
+        xlabel = "time (s)" if iv else "frame"
+
+        traces = self.session.traces
+        if self.show_smoothed.isChecked() and traces.smoothed is not None:
+            ylabel = f"ΔF/F (smoothed, σ={traces.smoothed_sigma:g})"
+        elif self.show_dff.isChecked() and traces.dff is not None:
+            ylabel = "ΔF/F"
+        else:
+            ylabel = "mean intensity"
+
+        events = [(ev.frame * scale, ev.label) for ev, _ in self._event_lines]
+        regions = []
+        if (BaselineMethod(self.baseline_box.currentText()) == BaselineMethod.REGION
+                and self.region.scene() is not None):
+            lo, hi = self.region.getRegion()
+            regions.append((lo * scale, hi * scale, "#0072B2"))
+        if self.prop_region.scene() is not None:
+            lo, hi = self.prop_region.getRegion()
+            regions.append((lo * scale, hi * scale, "#009E73"))
+        onsets = None
+        prop = self.session.analyses.get("propagation")
+        if self._onset_lines and prop is not None:
+            onsets = [((start + t) * scale) if np.isfinite(t) else None
+                      for t in np.asarray(prop["onsets"], dtype=float)]
+
+        def render(path):
+            from .. import figures
+
+            fig = figures.export_traces(
+                [data[i] for i in range(data.shape[0])], x=x, xlabel=xlabel,
+                ylabel=ylabel, labels=list(labels), events=events,
+                regions=regions, onsets=onsets, save=path,
+            )
+            import matplotlib.pyplot as plt
+
+            plt.close(fig)
+
+        save_figure_dialog(self, render, title="Save traces", status=self.status)
+
+    def _save_propagation(self):
+        """Export the distance-vs-onset-delay scatter as shown (WYSIWYG, clean)."""
+        fit = self._prop_fit
+        if not fit:
+            self.status.setText("Run propagation first.")
+            return
+
+        def render(path):
+            from .. import figures
+
+            f = figures.export_scatter(
+                fit["delay"], fit["dist"], xlabel=fit["xlabel"],
+                ylabel=fit["ylabel"], point_labels=fit["labels"],
+                fit=fit["fit"], title=fit["title"], save=path,
+            )
+            import matplotlib.pyplot as plt
+
+            plt.close(f)
+
+        save_figure_dialog(self, render, title="Save propagation figure",
+                           status=self.status)
 
     def closeEvent(self, event):
         self.result = self.session.analyses

@@ -26,6 +26,45 @@ def ensure_app():
     return app, created
 
 
+def save_figure_dialog(parent, render, *, title="Save figure", status=None):
+    """Prompt for a path and write a figure there via ``render(path)``.
+
+    ``render`` receives the chosen path and should call the relevant ``figures``
+    function with ``save=path`` (and close the returned Figure). Vector
+    (PDF/SVG) and raster (PNG/TIFF) formats are offered; the file extension picks
+    the format, appended from the chosen filter when the user types none. Any
+    render/IO error is reported on ``status`` (a QLabel) when given, else via a
+    message box; the widget stays open either way. Returns the path written, or
+    ``None`` if cancelled or failed.
+    """
+    import os
+
+    _QtCore, _QtGui, QtWidgets = get_qt()
+    filters = ("PNG image (*.png);;PDF document (*.pdf);;"
+               "SVG image (*.svg);;TIFF image (*.tif)")
+    path, selected = QtWidgets.QFileDialog.getSaveFileName(parent, title, "", filters)
+    if not path:
+        return None
+    # Append the selected filter's extension when the user typed none.
+    if not os.path.splitext(path)[1]:
+        for ext in (".png", ".pdf", ".svg", ".tif"):
+            if ext[1:] in selected.lower():
+                path += ext
+                break
+    try:
+        render(path)
+    except Exception as exc:  # noqa: BLE001 — surface any render/IO failure to the UI
+        message = f"Could not save figure: {exc}"
+        if status is not None:
+            status.setText(message)
+        else:
+            QtWidgets.QMessageBox.warning(parent, "Save failed", message)
+        return None
+    if status is not None:
+        status.setText(f"Saved {path}")
+    return path
+
+
 def run_widget_blocking(factory):
     """Open a widget, block until it closes, and return its ``.result``. SPEC §2.2.
 
