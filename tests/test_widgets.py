@@ -476,6 +476,116 @@ def test_analysis_widget_onset_heatmap():
     print("analysis widget onset heatmap OK")
 
 
+def test_analysis_widget_propagation_uses_displayed_signal():
+    """Propagation detects onsets on whatever the trace plot shows: with 'Show
+    smoothed ΔF/F' checked it reads traces.smoothed, otherwise traces.dff."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    from caliana import analysis
+
+    # Three ROIs, each stepping up at a different frame -> real ΔF/F onsets.
+    rng = np.random.default_rng(5)
+    T, Y, X = 40, 12, 10
+    stack = rng.normal(10, 0.3, (T, Y, X))
+    centers = [(3, 3), (3, 6), (6, 3)]
+    for i, (cy, cx) in enumerate(centers):
+        stack[15 + 3 * i:, cy - 1:cy + 2, cx - 1:cx + 2] += 20.0
+    s = caliana.Session()
+    s.data = stack.astype(np.float32)
+    s.timeline = caliana.Timeline(n_frames=T)
+    for c in centers:
+        s.add_roi(center=c, size=3)
+
+    w = AnalysisWidget(s)
+    n = len(s.rois)
+    Tt = s.traces.raw.shape[1]
+
+    # A hand-built smoothed array with clearly different per-ROI onsets (steps at
+    # 25/28/31) so we can tell which signal drove detection.
+    crafted = np.zeros((n, Tt))
+    for i in range(n):
+        crafted[i, 25 + 3 * i:] = 5.0
+    s.traces.smoothed = crafted
+    s.traces.smoothed_sigma = 1.0
+
+    w.prop_region.setRegion((0, 10))            # baseline window [0, 10)
+    lo, hi = sorted(int(round(v)) for v in w.prop_region.getRegion())
+    region = (lo - w._crop_start(), hi - w._crop_start())
+    kw = dict(method=w.onset_method_box.currentText(), frac=w.frac_box.value(),
+              k=w.k_box.value(), d=w.d_box.value(), baseline_region=region)
+
+    # 'Show smoothed' checked -> onsets come from the crafted smoothed rows.
+    w.show_smoothed.setChecked(True)
+    res_sm = w.compute_propagation()
+    for i in range(n):
+        ref = analysis.onset_time(crafted[i], **kw)
+        got = res_sm["onsets"][i]
+        assert (np.isnan(got) and np.isnan(ref)) or abs(got - ref) < 1e-6
+
+    # Unchecked (ΔF/F shown) -> onsets come from traces.dff instead.
+    w.show_smoothed.setChecked(False)
+    w.show_dff.setChecked(True)
+    res_dff = w.compute_propagation()
+    for i in range(n):
+        ref = analysis.onset_time(s.traces.dff[i], **kw)
+        got = res_dff["onsets"][i]
+        assert (np.isnan(got) and np.isnan(ref)) or abs(got - ref) < 1e-6
+
+    # The toggle genuinely changed which signal was used.
+    assert not np.allclose(res_sm["onsets"], res_dff["onsets"], equal_nan=True)
+
+    w.close()
+    print("analysis widget propagation displayed-signal OK")
+
+
+def test_analysis_widget_derivative_onset():
+    """The 'derivative' onset method is selectable on both panels: it gates k+d
+    (not frac), and the heatmap it produces matches onset_time per pixel."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    from caliana import analysis
+
+    # Flat baseline then a per-row step, so the rate of change spikes at the rise.
+    rng = np.random.default_rng(4)
+    T, Y, X = 30, 12, 10
+    stack = rng.normal(10, 0.3, (T, Y, X))
+    for y in range(Y):
+        stack[8 + y:, y, :] += 20.0
+    s = caliana.Session()
+    s.data = stack.astype(np.float32)
+    s.timeline = caliana.Timeline(n_frames=T)
+    s.add_roi(center=(4, 6), size=3)
+
+    w = AnalysisWidget(s)
+
+    # Heatmap panel: derivative enables k and d, disables frac.
+    w.hm_method_box.setCurrentText("derivative")
+    assert w.hm_k_box.isEnabled() and w.hm_d_box.isEnabled()
+    assert not w.hm_frac_box.isEnabled()
+
+    # Map agrees, pixel for pixel, with the scalar detector at the same params.
+    w.hm_k_box.setValue(2.0)
+    w.hm_d_box.setValue(1.0)
+    w.hm_base_start.setValue(0)
+    w.hm_base_end.setValue(6)             # baseline window [0, 6)
+    mp = w.compute_onset_heatmap()
+    assert mp.shape == (Y, X)
+    ref = analysis.onset_time(s.data[:, 4, 6].astype(float), method="derivative",
+                              k=2.0, d=1.0, baseline_region=(0, 6))
+    assert (np.isnan(mp[4, 6]) and np.isnan(ref)) or abs(float(mp[4, 6]) - float(ref)) < 1e-6
+
+    # Propagation panel gates the same way.
+    w.onset_method_box.setCurrentText("derivative")
+    assert w.k_box.isEnabled() and w.d_box.isEnabled() and not w.frac_box.isEnabled()
+
+    w.close()
+    print("analysis widget derivative onset OK")
+
+
 if __name__ == "__main__":
     test_import_preview_widget()
     test_roi_selection_widget()
@@ -488,3 +598,5 @@ if __name__ == "__main__":
     test_analysis_widget_smoothing()
     test_analysis_widget_analysis_selection()
     test_analysis_widget_onset_heatmap()
+    test_analysis_widget_propagation_uses_displayed_signal()
+    test_analysis_widget_derivative_onset()

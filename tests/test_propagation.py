@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from caliana.analysis import cross_roi_propagation, onset_time
+from caliana.analysis import cross_roi_propagation, onset_time, onset_time_map
 from caliana.models import ROI, ROIShape, Traces
 
 
@@ -122,6 +122,75 @@ def test_onset_only_after_baseline_region():
     assert onset_time(sig, method="fraction_of_max", frac=0.5) < 5
 
 
+def test_onset_derivative_detects_rise():
+    # The derivative detector fires where the rate of change first exceeds the
+    # baseline-derivative threshold. A flat trace that steps up at frame 30 has a
+    # near-zero baseline derivative, so a small d cleanly isolates the rise.
+    sig = np.zeros(60)
+    sig[30:] = 5.0
+    t = onset_time(sig, method="derivative", k=3.0, d=0.5, baseline_region=(0, 20))
+    assert not np.isnan(t)
+    assert 27.0 <= t <= 30.0          # crossing sits at the step (central-diff spreads it)
+    assert t > 20.0                   # never inside/before the baseline window
+
+
+def test_onset_derivative_offset_suppresses_flat():
+    # On a flat trace the baseline derivative is exactly 0, so any d > 0 lifts the
+    # threshold above the (zero) rate of change everywhere -> no onset.
+    flat = np.zeros(40)
+    assert np.isnan(onset_time(flat, method="derivative", k=3.0, d=0.5,
+                               baseline_region=(0, 20)))
+
+
+def test_onset_derivative_short_trace_is_robust():
+    # np.gradient needs >= 2 samples; the default baseline (first 10% of frames) is a
+    # single frame here. Must not raise, and must still resolve the rise.
+    sig = np.array([0.0, 0.0, 0.0, 3.0, 3.0, 3.0])
+    t = onset_time(sig, method="derivative", k=0.0, d=0.5)
+    assert np.isfinite(t) and 1.0 <= t <= 3.0
+    # A width-1 baseline_region (also size-1) is likewise safe.
+    assert np.isfinite(onset_time(sig, method="derivative", d=0.5, baseline_region=(0, 1)))
+    # A degenerate 1-frame trace can't be differentiated -> NaN, not a crash.
+    assert np.isnan(onset_time(np.array([1.0]), method="derivative"))
+
+
+def test_propagation_uses_smoothed_signal():
+    # signal="smoothed" detects onsets on traces.smoothed; with no smoothed array it
+    # falls back to raw (mirroring the dff fallback).
+    T = 60
+    dff = _logistic_step(T, onset=20.0, tau=0.6)[None]         # step at 20
+    smoothed = _logistic_step(T, onset=40.0, tau=0.6)[None]    # distinct step at 40
+    traces = Traces(raw=dff.copy(), dff=dff, smoothed=smoothed, labels=["r0"])
+    rois = [ROI(center=(10, 10), size=3, shape=ROIShape.CIRCLE)]
+
+    on_sm = cross_roi_propagation(traces, rois, signal="smoothed", frac=0.5)["onsets"]
+    on_dff = cross_roi_propagation(traces, rois, signal="dff", frac=0.5)["onsets"]
+    assert abs(on_sm[0] - 40.0) < 0.5      # smoothed array drove detection
+    assert abs(on_dff[0] - 20.0) < 0.5     # dff array drove detection
+
+    # Requesting smoothed when none is computed falls back to raw (== step at 20 here).
+    bare = Traces(raw=dff.copy(), dff=dff, labels=["r0"])
+    on_fallback = cross_roi_propagation(bare, rois, signal="smoothed", frac=0.5)["onsets"]
+    assert abs(on_fallback[0] - 20.0) < 0.5
+
+
+def test_onset_time_map_derivative_matches_onset_time():
+    # The vectorised per-pixel derivative map must equal the scalar detector run on
+    # each pixel's trace (same guarantee the fraction_of_max heatmap test makes).
+    T, Y, X = 60, 3, 4
+    stack = np.zeros((T, Y, X))
+    for y in range(Y):
+        for x in range(X):
+            stack[25 + y + x:, y, x] = 4.0            # step at a per-pixel frame
+    mp = onset_time_map(stack, method="derivative", k=2.0, d=0.5, baseline_region=(0, 20))
+    for y in range(Y):
+        for x in range(X):
+            ref = onset_time(stack[:, y, x], method="derivative", k=2.0, d=0.5,
+                             baseline_region=(0, 20))
+            got = mp[y, x]
+            assert (np.isnan(got) and np.isnan(ref)) or abs(got - ref) < 1e-9
+
+
 if __name__ == "__main__":
     test_onset_time_recovers_crossing()
     test_fraction_of_max_frac_one_returns_time_to_peak()
@@ -131,4 +200,9 @@ if __name__ == "__main__":
     test_no_response_gives_nan_onset()
     test_onset_baseline_region_sets_threshold()
     test_onset_only_after_baseline_region()
+    test_onset_derivative_detects_rise()
+    test_onset_derivative_offset_suppresses_flat()
+    test_onset_derivative_short_trace_is_robust()
+    test_propagation_uses_smoothed_signal()
+    test_onset_time_map_derivative_matches_onset_time()
     print("propagation tests OK")

@@ -11,18 +11,19 @@ Two tabbed pages:
   be toggled on/off independently (`smooth_traces`, `session.smooth_traces` for
   headless use).
 - Pick one analysis to run; only that analysis' controls are shown:
-  - Cross-ROI propagation: choose the onset-time method (fraction_of_max / std) and its
-    parameters (frac / k), and drag a baseline window (the green band) that sets
+  - Cross-ROI propagation: choose the onset-time method (fraction_of_max / std /
+    derivative) and its parameters (frac / k / d), and drag a baseline window (the green band) that sets
     the level onsets are measured from; overlay per-ROI onset times, summarise
     speed / direction / source ROI, and plot distance-along-propagation vs onset
-    delay with the line implied by that speed and its R². Time readouts switch to
+    delay with the line implied by that speed and its R². Onsets are detected on the
+    signal currently displayed (raw / ΔF/F / smoothed). Time readouts switch to
     seconds when a frame interval is set.
 - Mark optional stimulus events as draggable vertical lines.
 
 **Heatmaps** — dataset-wide (not per-ROI) maps. Currently a per-pixel onset-time
 heatmap: the same onset detector used for propagation (`analysis.onset_time`) is
 run on every pixel's temporal trace (optionally after n×n binning), colouring
-each pixel by when it first responds. Method / frac / k / baseline mirror the
+each pixel by when it first responds. Method / frac / k / d / baseline mirror the
 propagation controls, so a heatmap pixel and a same-parameter ROI onset agree.
 
 Interaction logic lives in plain methods (`compute_dff`, `smooth_traces`,
@@ -217,7 +218,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Onset method:"))
         self.hm_method_box = QtWidgets.QComboBox()
-        self.hm_method_box.addItems(["fraction_of_max", "std"])
+        self.hm_method_box.addItems(["fraction_of_max", "std", "derivative"])
         self.hm_method_box.currentTextChanged.connect(self._on_hm_method_changed)
         row.addWidget(self.hm_method_box)
 
@@ -236,8 +237,18 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.hm_k_box.setRange(0.0, 100.0)
         self.hm_k_box.setSingleStep(0.5)
         self.hm_k_box.setValue(3.0)
-        self.hm_k_box.setToolTip("std threshold = baseline_mean + k·baseline_std")
+        self.hm_k_box.setToolTip("std / derivative threshold both scale baseline_std by k")
         row.addWidget(self.hm_k_box)
+
+        self.hm_d_label = QtWidgets.QLabel("d:")
+        row.addWidget(self.hm_d_label)
+        self.hm_d_box = QtWidgets.QDoubleSpinBox()
+        self.hm_d_box.setRange(-1e6, 1e6)
+        self.hm_d_box.setDecimals(3)
+        self.hm_d_box.setSingleStep(0.01)
+        self.hm_d_box.setValue(0.0)
+        self.hm_d_box.setToolTip("derivative threshold = baseline_deriv_mean + k·baseline_deriv_std + d")
+        row.addWidget(self.hm_d_box)
 
         row.addSpacing(16)
         row.addWidget(QtWidgets.QLabel("Baseline [start, end):"))
@@ -294,7 +305,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         row.addSpacing(16)
         row.addWidget(QtWidgets.QLabel("Onset method:"))
         self.onset_method_box = QtWidgets.QComboBox()
-        self.onset_method_box.addItems(["fraction_of_max", "std"])
+        self.onset_method_box.addItems(["fraction_of_max", "std", "derivative"])
         self.onset_method_box.currentTextChanged.connect(self._on_onset_method_changed)
         row.addWidget(self.onset_method_box)
 
@@ -313,8 +324,18 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.k_box.setRange(0.0, 100.0)
         self.k_box.setSingleStep(0.5)
         self.k_box.setValue(3.0)
-        self.k_box.setToolTip("std threshold = baseline_mean + k·baseline_std")
+        self.k_box.setToolTip("std / derivative threshold both scale baseline_std by k")
         row.addWidget(self.k_box)
+
+        self.d_label = QtWidgets.QLabel("d:")
+        row.addWidget(self.d_label)
+        self.d_box = QtWidgets.QDoubleSpinBox()
+        self.d_box.setRange(-1e6, 1e6)
+        self.d_box.setDecimals(3)
+        self.d_box.setSingleStep(0.01)
+        self.d_box.setValue(0.0)
+        self.d_box.setToolTip("derivative threshold = baseline_deriv_mean + k·baseline_deriv_std + d")
+        row.addWidget(self.d_box)
 
         self.prop_btn = QtWidgets.QPushButton("Propagation")
         self.prop_btn.clicked.connect(self.compute_propagation)
@@ -448,13 +469,20 @@ class AnalysisWidget(QtWidgets.QWidget):
         if not self.session.rois:
             self.status.setText("No traces; place ROIs first.")
             return None
-        signal = "dff" if (self.show_dff.isChecked() and self.session.traces is not None
-                           and self.session.traces.dff is not None) else "raw"
+        # Detect onsets on whatever the trace plot shows (smoothed → ΔF/F → raw), so
+        # the overlaid onset lines line up with the displayed curves.
+        traces = self.session.traces
+        if self.show_smoothed.isChecked() and traces is not None and traces.smoothed is not None:
+            signal = "smoothed"
+        elif self.show_dff.isChecked() and traces is not None and traces.dff is not None:
+            signal = "dff"
+        else:
+            signal = "raw"
         start = self._crop_start()  # region is in frames; traces index from 0
         lo, hi = sorted(int(round(v)) for v in self.prop_region.getRegion())
         result = self.session.cross_roi_propagation(
             signal=signal, method=self.onset_method_box.currentText(),
-            frac=self.frac_box.value(), k=self.k_box.value(),
+            frac=self.frac_box.value(), k=self.k_box.value(), d=self.d_box.value(),
             baseline_region=(lo - start, hi - start),
         )
         self._overlay_onsets(result["onsets"])
@@ -477,7 +505,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         region = (lo, hi) if hi > lo else None
         mp = self.session.onset_heatmap(
             method=self.hm_method_box.currentText(),
-            frac=self.hm_frac_box.value(), k=self.hm_k_box.value(),
+            frac=self.hm_frac_box.value(), k=self.hm_k_box.value(), d=self.hm_d_box.value(),
             baseline_region=region, bin_size=self.hm_bin_box.value(),
         )
         self._show_heatmap(mp)
@@ -786,17 +814,20 @@ class AnalysisWidget(QtWidgets.QWidget):
             self._clear_onsets()
 
     def _on_onset_method_changed(self, method: str):
-        """frac applies to fraction_of_max, k to std — enable only the relevant one."""
-        is_frac = method == "fraction_of_max"
-        self.frac_label.setEnabled(is_frac)
-        self.frac_box.setEnabled(is_frac)
-        self.k_label.setEnabled(not is_frac)
-        self.k_box.setEnabled(not is_frac)
+        """Enable only the params a method uses: frac→fraction_of_max, k→std &
+        derivative, d→derivative."""
+        self.frac_label.setEnabled(method == "fraction_of_max")
+        self.frac_box.setEnabled(method == "fraction_of_max")
+        self.k_label.setEnabled(method in ("std", "derivative"))
+        self.k_box.setEnabled(method in ("std", "derivative"))
+        self.d_label.setEnabled(method == "derivative")
+        self.d_box.setEnabled(method == "derivative")
 
     def _on_hm_method_changed(self, method: str):
         """Heatmap counterpart of ``_on_onset_method_changed``."""
-        is_frac = method == "fraction_of_max"
-        self.hm_frac_label.setEnabled(is_frac)
-        self.hm_frac_box.setEnabled(is_frac)
-        self.hm_k_label.setEnabled(not is_frac)
-        self.hm_k_box.setEnabled(not is_frac)
+        self.hm_frac_label.setEnabled(method == "fraction_of_max")
+        self.hm_frac_box.setEnabled(method == "fraction_of_max")
+        self.hm_k_label.setEnabled(method in ("std", "derivative"))
+        self.hm_k_box.setEnabled(method in ("std", "derivative"))
+        self.hm_d_label.setEnabled(method == "derivative")
+        self.hm_d_box.setEnabled(method == "derivative")

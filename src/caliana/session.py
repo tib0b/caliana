@@ -339,8 +339,7 @@ class Session:
         """Estimate signal propagation across ROIs; stores it under ``analyses``.
 
         Keyword args are forwarded to ``analysis.cross_roi_propagation``
-        (``signal``, ``method``, ``frac``, ``k``, ``baseline_frames``,
-        ``baseline_region``).
+        (``signal``, ``method``, ``frac``, ``k``, ``d``, ``baseline_region``).
         """
         if self.traces is None:
             self.extract_traces()
@@ -353,6 +352,7 @@ class Session:
         method: str = "fraction_of_max",
         frac: float = 0.5,
         k: float = 3.0,
+        d: float = 0.0,
         baseline_region: tuple[int, int] | None = None,
         bin_size: int = 1,
     ) -> np.ndarray:
@@ -360,7 +360,7 @@ class Session:
 
         Runs the per-ROI detector (``analysis.onset_time_map``) on every pixel,
         honoring ``crop_window`` so it covers the same interval as the traces. See
-        ``onset_time`` for ``method``/``frac``/``k`` and ``onset_time_map`` for
+        ``onset_time`` for ``method``/``frac``/``k``/``d`` and ``onset_time_map`` for
         ``bin_size``. ``baseline_region`` is in trace-column (post-crop)
         coordinates. NaN where no rise is detected.
         """
@@ -370,7 +370,7 @@ class Session:
             s, e = self.crop_window
             stack = stack[s:e]
         return analysis.onset_time_map(
-            stack, method=method, frac=frac, k=k,
+            stack, method=method, frac=frac, k=k, d=d,
             baseline_region=baseline_region, bin_size=bin_size,
         )
 

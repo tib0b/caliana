@@ -71,9 +71,9 @@ def smooth_traces(traces: Traces, sigma: float) -> Traces:
 def onset_time(
     sig: np.ndarray,
     method: str = "fraction_of_max",
-    baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
+    d: float = 0.0,
     baseline_region: tuple[int, int] | None = None,
 ) -> float:
     """Sub-frame index at which a trace first rises from baseline (NaN if none).
@@ -85,18 +85,21 @@ def onset_time(
       - ``"fraction_of_max"``: threshold = baseline + ``frac`` * (max - baseline),
         with ``frac`` in ``(0, 1]``. ``frac=1`` gives time-to-max.
       - ``"std"``: threshold = baseline_mean + ``k`` * baseline_std.
+      - ``"derivative"``: differentiate the trace (``np.gradient``) and cross where
+        the rate of change exceeds baseline_derivative_mean + ``k`` *
+        baseline_derivative_std + ``d`` — catches the steepest-rise moment
+        irrespective of absolute level. Needs >= 2 frames.
 
-    Baseline is measured over ``baseline_region`` ``[start, end)`` if given, else
-    the first ``baseline_frames`` frames, else the per-method default (trace min for
-    ``fraction_of_max``, first 10% of frames for ``std``). With ``baseline_region``
-    the rise is searched only from its end onward.
+    Baseline is measured over ``baseline_region`` ``[start, end)`` if given, else the
+    per-method default (trace min for ``fraction_of_max``, first 10% of frames for
+    ``std`` and ``derivative``). With ``baseline_region`` the rise is searched only
+    from its end onward.
     """
+
     sig = np.asarray(sig, dtype=float)
     if baseline_region is not None:
         s, e = baseline_region
         base_slice = sig[s:e]
-    elif baseline_frames:
-        base_slice = sig[:baseline_frames]
     else:
         base_slice = None
     have_base = base_slice is not None and base_slice.size > 0
@@ -113,8 +116,22 @@ def onset_time(
     elif method == "std":
         base_slice = base_slice if have_base else sig[: max(1, len(sig) // 10)]
         thresh = base_slice.mean() + k * base_slice.std()
+    elif method == "derivative":
+        # Differentiate, then threshold the rate of change. np.gradient needs >= 2
+        # samples; baseline stats read off the same derivative the search sees.
+        if sig.size < 2:
+            return float("nan")
+        sig = np.gradient(sig)
+        if have_base and baseline_region is not None:
+            base = sig[baseline_region[0]:baseline_region[1]]
+        else:
+            base = sig[: max(1, len(sig) // 10)]
+        thresh = float(base.mean()) + k * float(base.std()) + d
     else:
-        raise ValueError(f"Unknown onset method {method!r} (expected 'fraction_of_max' | 'std')")
+        raise ValueError(
+            f"Unknown onset method {method!r} "
+            "(expected 'fraction_of_max' | 'std' | 'derivative')"
+        )
 
     # An onset can only occur after the baseline window: restrict the crossing
     # search to frames from the region's end onward, so a rise within or before the
@@ -134,16 +151,16 @@ def onset_time(
 def onset_time_map(
     stack: np.ndarray,
     method: str = "fraction_of_max",
-    baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
+    d: float = 0.0,
     baseline_region: tuple[int, int] | None = None,
     bin_size: int = 1,
 ) -> np.ndarray:
     """Per-pixel ``onset_time`` over a ``[T, Y, X]`` stack → 2D ``[Y, X]`` map.
 
     Applies the same detector to every pixel's temporal trace, returning onset
-    frames (NaN where no rise). ``method``, ``frac``, ``k``, ``baseline_frames``,
+    frames (NaN where no rise). ``method``, ``frac``, ``k``, ``d``,
     ``baseline_region`` mean exactly what they do in ``onset_time``.
 
     bin_size: mean-pool into non-overlapping ``bin_size × bin_size`` blocks first
@@ -165,13 +182,11 @@ def onset_time_map(
     sig = stack.reshape(T, -1)                         # [T, P] one column per pixel
     P = sig.shape[1]
 
-    # Per-pixel baseline, mirroring onset_time's precedence: explicit region, then
-    # a leading frame count, then the per-method default.
+    # Per-pixel baseline, mirroring onset_time's precedence: explicit region, else
+    # the per-method default.
     if baseline_region is not None:
         s, e = baseline_region
         base_slice = sig[s:e]
-    elif baseline_frames:
-        base_slice = sig[:baseline_frames]
     else:
         base_slice = None
     have_base = base_slice is not None and base_slice.shape[0] > 0
@@ -188,8 +203,23 @@ def onset_time_map(
         bs = base_slice if have_base else sig[: max(1, T // 10)]
         thresh = bs.mean(axis=0) + k * bs.std(axis=0)
         undefined = np.zeros(P, dtype=bool)
+    elif method == "derivative":
+        # Per-pixel rate of change (np.gradient along time); onset = derivative
+        # crossing. Mirrors onset_time's derivative branch so map and per-ROI agree.
+        if T < 2:
+            raise ValueError("derivative onset needs at least 2 frames")
+        sig = np.gradient(sig, axis=0)
+        if have_base and baseline_region is not None:
+            base = sig[baseline_region[0]:baseline_region[1]]
+        else:
+            base = sig[: max(1, T // 10)]
+        thresh = base.mean(axis=0) + k * base.std(axis=0) + d
+        undefined = np.zeros(P, dtype=bool)
     else:
-        raise ValueError(f"Unknown onset method {method!r} (expected 'fraction_of_max' | 'std')")
+        raise ValueError(
+            f"Unknown onset method {method!r} "
+            "(expected 'fraction_of_max' | 'std' | 'derivative')"
+        )
 
     # First frame at/after the baseline window whose value reaches threshold.
     start = baseline_region[1] if baseline_region is not None else 0
@@ -218,9 +248,9 @@ def cross_roi_propagation(
     rois: list[ROI],
     signal: str = "dff",
     method: str = "fraction_of_max",
-    baseline_frames: int | None = None,
     frac: float = 0.5,
     k: float = 3.0,
+    d: float = 0.0,
     baseline_region: tuple[int, int] | None = None,
 ) -> dict:
     """Estimate signal propagation across ROIs from per-ROI onset timing.
@@ -230,16 +260,23 @@ def cross_roi_propagation(
     ``source_roi``, ``speed_px_per_frame``, a ``direction`` unit vector ``(dy, dx)``
     toward later onset, and ``pairwise`` speeds.
 
-    signal: ``"dff"`` (uses ``traces.dff`` if computed) or ``"raw"``.
-    method / frac / k / baseline_frames / baseline_region: passed to ``onset_time``.
+    signal: ``"smoothed"`` (``traces.smoothed``), ``"dff"`` (``traces.dff``), or
+        ``"raw"`` — each falls back to ``raw`` if the requested array isn't computed.
+    method / frac / k / d / baseline_region: passed to ``onset_time``.
     """
-    data = traces.dff if (signal == "dff" and traces.dff is not None) else traces.raw
+    if signal == "smoothed" and traces.smoothed is not None:
+        data = traces.smoothed
+    elif signal == "dff" and traces.dff is not None:
+        data = traces.dff
+    else:
+        data = traces.raw
     n = data.shape[0]
     if n != len(rois):
         raise ValueError(f"traces ({n}) and rois ({len(rois)}) count mismatch")
 
     onsets = np.array(
-        [onset_time(data[i], method, baseline_frames, frac, k, baseline_region)
+        [onset_time(data[i], method=method, frac=frac, k=k, d=d,
+                    baseline_region=baseline_region)
          for i in range(n)]
     )
     coords = np.array([roi.center for roi in rois], dtype=float)  # (y, x)
