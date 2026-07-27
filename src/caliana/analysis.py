@@ -97,11 +97,9 @@ def onset_time(
     """
 
     sig = np.asarray(sig, dtype=float)
-    if baseline_region is not None:
-        s, e = baseline_region
-        base_slice = sig[s:e]
-    else:
-        base_slice = None
+    # An explicit baseline window wins over the per-method default, but only when
+    # it actually selects frames; an empty/out-of-range one falls back.
+    base_slice = sig[slice(*baseline_region)] if baseline_region is not None else None
     have_base = base_slice is not None and base_slice.size > 0
 
     if method == "fraction_of_max":
@@ -118,14 +116,13 @@ def onset_time(
         thresh = base_slice.mean() + k * base_slice.std()
     elif method == "derivative":
         # Differentiate, then threshold the rate of change. np.gradient needs >= 2
-        # samples; baseline stats read off the same derivative the search sees.
+        # samples; baseline stats read off the same derivative the search sees, so
+        # the window is re-sliced from the differentiated signal.
         if sig.size < 2:
             return float("nan")
         sig = np.gradient(sig)
-        if have_base and baseline_region is not None:
-            base = sig[baseline_region[0]:baseline_region[1]]
-        else:
-            base = sig[: max(1, len(sig) // 10)]
+        base = (sig[slice(*baseline_region)] if have_base
+                else sig[: max(1, len(sig) // 10)])
         thresh = float(base.mean()) + k * float(base.std()) + d
     else:
         raise ValueError(
@@ -184,11 +181,7 @@ def onset_time_map(
 
     # Per-pixel baseline, mirroring onset_time's precedence: explicit region, else
     # the per-method default.
-    if baseline_region is not None:
-        s, e = baseline_region
-        base_slice = sig[s:e]
-    else:
-        base_slice = None
+    base_slice = sig[slice(*baseline_region)] if baseline_region is not None else None
     have_base = base_slice is not None and base_slice.shape[0] > 0
 
     if method == "fraction_of_max":
@@ -209,10 +202,8 @@ def onset_time_map(
         if T < 2:
             raise ValueError("derivative onset needs at least 2 frames")
         sig = np.gradient(sig, axis=0)
-        if have_base and baseline_region is not None:
-            base = sig[baseline_region[0]:baseline_region[1]]
-        else:
-            base = sig[: max(1, T // 10)]
+        base = (sig[slice(*baseline_region)] if have_base
+                else sig[: max(1, T // 10)])
         thresh = base.mean(axis=0) + k * base.std(axis=0) + d
         undefined = np.zeros(P, dtype=bool)
     else:
@@ -317,12 +308,13 @@ def cross_roi_propagation(
     elif nv == 2:
         p = result["pairwise"][0]
         result["speed_px_per_frame"] = p["speed_px_per_frame"]
-        d = coords[p["j"]] - coords[p["i"]]
+        # Point the direction from the earlier onset toward the later one.
+        step = coords[p["j"]] - coords[p["i"]]
         if p["delta_t"] < 0:
-            d = -d
-        norm = float(np.hypot(*d))
+            step = -step
+        norm = float(np.hypot(*step))
         if norm > 0:
-            result["direction"] = (float(d[0] / norm), float(d[1] / norm))
+            result["direction"] = (float(step[0] / norm), float(step[1] / norm))
 
     return result
 

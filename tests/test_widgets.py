@@ -320,7 +320,7 @@ def test_analysis_widget():
     w.compute_dff()
     assert s.traces.dff is not None
     assert w.show_dff.isChecked()
-    data, _ = w._display_data()
+    data = w._displayed().data
     assert data is s.traces.dff
 
     # REGION baseline uses the draggable window bounds.
@@ -368,12 +368,12 @@ def test_analysis_widget_smoothing():
     assert np.array_equal(s.traces.raw, raw_before)     # raw untouched
     assert np.array_equal(s.traces.dff, dff_before)     # dff untouched
     assert w.show_smoothed.isChecked()                  # auto-enabled after smoothing
-    data, _ = w._display_data()
+    data = w._displayed().data
     assert data is s.traces.smoothed
 
     # Toggling off falls back to raw (the default display).
     w.show_smoothed.setChecked(False)
-    data, _ = w._display_data()
+    data = w._displayed().data
     assert data is s.traces.raw
 
     w.close()

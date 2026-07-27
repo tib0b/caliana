@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
+from .. import figures
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -102,29 +103,16 @@ class ImportPreviewWidget(QtWidgets.QWidget):
             self.movie.setImage(np.zeros((1, 1, 1)))
             return
         stack = np.asarray(self.session._working_stack())
-        # axes maps stack dims -> ImageView roles (row-major: 1=y, 2=x). Default
-        # the contrast range to [min, 99th pct] so a few very bright pixels don't
-        # wash out the display (see _default_levels); the histogram still spans the
-        # full data range, so the region can be dragged wider if needed.
+        # axes maps stack dims -> ImageView roles (row-major: 1=y, 2=x). Contrast
+        # defaults to figures.intensity_levels' [min, 99th pct] — the same range
+        # the saved figure uses, so the export matches the preview — while the
+        # histogram still spans the full data range and can be dragged wider.
         self.movie.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
-                            autoLevels=False, levels=self._default_levels(stack))
+                            autoLevels=False, levels=figures.intensity_levels(stack))
         self.movie.sigTimeChanged.connect(self._on_time_changed)
         mip = self.session.max_projection()
         self.heatmap.setImage(mip, autoLevels=False,
-                              levels=self._default_levels(mip))
-
-    @staticmethod
-    def _default_levels(image):
-        """Default display range ``(min, 99th percentile)`` of the intensities.
-
-        Anchoring the low end at the data minimum and clipping the high end at the
-        99th percentile keeps a handful of outlier-bright pixels from flattening
-        the contrast across the rest of the image. Shared with the static figures
-        (``figures.intensity_levels``) so a saved image matches the preview.
-        """
-        from ..figures import intensity_levels
-
-        return intensity_levels(image)
+                              levels=figures.intensity_levels(mip))
 
     # ------------------------------------------------------------- saving
     def _save_heatmap(self):
@@ -141,15 +129,10 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         levels = self.heatmap.getLevels()
 
         def render(path):
-            from .. import figures
-
-            fig = figures.export_image(
+            return figures.export_image(
                 image, levels=levels, cmap="inferno",
                 cbar_label="normalized max intensity", save=path,
             )
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
 
         save_figure_dialog(self, render, title="Save max-intensity image",
                            status=self.status)

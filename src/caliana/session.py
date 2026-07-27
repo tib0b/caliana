@@ -171,12 +171,9 @@ class Session:
         ``"circle"``/``"square"``). In per-leaf mode the ROI auto-assigns to its
         containing leaf box.
         """
-        roi = ROI(center=tuple(center), size=size, shape=ROIShape(shape), label=label)
-        if self.registration.mode == RegistrationMode.PER_LEAF:
-            roi.leaf_region = roi_mod.assign_roi_to_leaf(roi, self.leaf_regions)
-        self.rois.append(roi)
-        self._invalidate_traces()
-        return roi
+        return self._append_roi(
+            ROI(center=tuple(center), size=size, shape=ROIShape(shape), label=label)
+        )
 
     def add_polygon_roi(self, vertices, label: str = "") -> ROI:
         """Add a free-hand polygon ROI (e.g. a whole leaf).
@@ -186,14 +183,26 @@ class Session:
         leaf box.
         """
         verts = [tuple(v) for v in vertices]
-        roi = ROI(
+        return self._append_roi(ROI(
             center=roi_mod.polygon_centroid(verts), size=0.0,
             shape=ROIShape.POLYGON, label=label, vertices=verts,
-        )
-        if self.registration.mode == RegistrationMode.PER_LEAF:
-            roi.leaf_region = roi_mod.assign_roi_to_leaf(roi, self.leaf_regions)
+        ))
+
+    def _append_roi(self, roi: ROI) -> ROI:
+        """Store a freshly built ROI: auto-assign its leaf, then drop stale traces."""
+        self.assign_leaf(roi)
         self.rois.append(roi)
         self._invalidate_traces()
+        return roi
+
+    def assign_leaf(self, roi: ROI) -> ROI:
+        """Point ``roi`` at the leaf box containing its centre (per-leaf mode only).
+
+        Call after moving an ROI so it stays attached to the right box; a no-op in
+        any other registration mode.
+        """
+        if self.registration.mode == RegistrationMode.PER_LEAF:
+            roi.leaf_region = roi_mod.assign_roi_to_leaf(roi, self.leaf_regions)
         return roi
 
     def extract_traces(self) -> Traces:
@@ -204,21 +213,25 @@ class Session:
         ``set_crop``/``crop_traces``) restricts the traces to that frame interval.
         """
         self._require_data()
-        # Two extraction paths:
-        #  - track_motion: keep raw pixels, move each ROI with its tissue per frame
-        #    (no resampling of the measured intensities).
-        #  - otherwise: _working_stack() is the stabilized stack (whole-frame warp,
-        #    or per-leaf composite of stabilized sub-stacks) and ROIs are static.
-        stack = self._working_stack()
-        start = 0
-        if self.crop_window is not None:
-            start, end = self.crop_window
-            stack = stack[start:end]
-        if self.track_motion and self._has_transforms():
-            self.traces = self._extract_tracked(stack, start)
-        else:
-            self.traces = roi_mod.extract_all_traces(stack, self.rois)
+        self.traces = self._extract_window(*self._crop_bounds())
         return self.traces
+
+    def _extract_window(self, start: int = 0, end: Optional[int] = None) -> Traces:
+        """Traces over frames ``[start, end)`` via the currently active path.
+
+        Two extraction paths:
+         - ``track_motion``: keep raw pixels, move each ROI with its tissue per
+           frame (no resampling of the measured intensities).
+         - otherwise: ``_working_stack()`` is the stabilized stack (whole-frame
+           warp, or per-leaf composite of stabilized sub-stacks), ROIs are static.
+
+        Separate from ``extract_traces`` so a caller can preview the *uncropped*
+        traces (the crop widget) through the same path the crop will later use.
+        """
+        stack = self._working_stack()[start:end]
+        if self.track_motion and self._has_transforms():
+            return self._extract_tracked(stack, start)
+        return roi_mod.extract_all_traces(stack, self.rois)
 
     def _has_transforms(self) -> bool:
         """Whether registration produced per-frame transforms to track ROIs with."""
@@ -365,10 +378,8 @@ class Session:
         coordinates. NaN where no rise is detected.
         """
         self._require_data()
-        stack = self._working_stack()
-        if self.crop_window is not None:
-            s, e = self.crop_window
-            stack = stack[s:e]
+        start, end = self._crop_bounds()
+        stack = self._working_stack()[start:end]
         return analysis.onset_time_map(
             stack, method=method, frac=frac, k=k, d=d,
             baseline_region=baseline_region, bin_size=bin_size,
@@ -430,7 +441,7 @@ class Session:
             n = len(self._working_stack())
         else:
             n = 0
-        start = self.crop_window[0] if self.crop_window is not None else 0
+        start, _end = self._crop_bounds()
         return np.arange(start, start + n)
 
     def export_traces(self, path) -> None:
@@ -445,30 +456,6 @@ class Session:
         """Write ``provenance()`` as a JSON sidecar at ``path``."""
         export.write_provenance(self, path)
 
-    # ---------------------------------------------------------------- Figures
-    # Paper-grade static matplotlib figures; each returns a Figure and accepts the
-    # keyword args of the matching figures.py function (see there for details).
-    def figure_traces(self, **kw):
-        """Stacked/overlaid ΔF/F traces. See ``figures.plot_traces`` for kwargs."""
-        from . import figures
-        return figures.plot_traces(self, **kw)
-
-    def figure_propagation(self, **kw):
-        """ROI onset map + propagation arrow. See ``figures.plot_propagation``."""
-        from . import figures
-        return figures.plot_propagation(self, **kw)
-
-    def figure_roi_overlay(self, **kw):
-        """Background image with ROIs drawn on top. See ``figures.plot_roi_overlay``."""
-        from . import figures
-        return figures.plot_roi_overlay(self, **kw)
-
-    def figure_imaging_electrode(self, aux_time, aux_signal, **kw):
-        """Calcium trace aligned with an electrode signal. See
-        ``figures.plot_imaging_electrode``."""
-        from . import figures
-        return figures.plot_imaging_electrode(self, aux_time, aux_signal, **kw)
-
     # ----------------------------------------------------------------- helpers
     def _require_data(self) -> None:
         if self.data is None:
@@ -477,6 +464,14 @@ class Session:
     def _working_stack(self) -> np.ndarray:
         """The stack ROIs/heatmaps act on: stabilized if registered, else raw."""
         return self.registered_data if self.registered_data is not None else self.data
+
+    def _crop_bounds(self) -> tuple[int, Optional[int]]:
+        """The ``[start, end)`` frame window in play — the crop, else the whole stack.
+
+        ``start`` doubles as the offset from trace columns to original frame
+        indices, which is what ``trace_frames`` and tracked extraction need.
+        """
+        return self.crop_window if self.crop_window is not None else (0, None)
 
     def _invalidate_traces(self) -> None:
         """Recomputation is explicit: upstream changes drop stale traces."""

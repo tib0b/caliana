@@ -30,12 +30,12 @@ def save_figure_dialog(parent, render, *, title="Save figure", status=None):
     """Prompt for a path and write a figure there via ``render(path)``.
 
     ``render`` receives the chosen path and should call the relevant ``figures``
-    function with ``save=path`` (and close the returned Figure). Vector
-    (PDF/SVG) and raster (PNG/TIFF) formats are offered; the file extension picks
-    the format, appended from the chosen filter when the user types none. Any
-    render/IO error is reported on ``status`` (a QLabel) when given, else via a
-    message box; the widget stays open either way. Returns the path written, or
-    ``None`` if cancelled or failed.
+    function with ``save=path``, returning the Figure — closing it is handled
+    here, so no caller has to remember. Vector (PDF/SVG) and raster (PNG/TIFF)
+    formats are offered; the file extension picks the format, appended from the
+    chosen filter when the user types none. Any render/IO error is reported on
+    ``status`` (a QLabel) when given, else via a message box; the widget stays
+    open either way. Returns the path written, or ``None`` if cancelled or failed.
     """
     import os
 
@@ -52,7 +52,7 @@ def save_figure_dialog(parent, render, *, title="Save figure", status=None):
                 path += ext
                 break
     try:
-        render(path)
+        fig = render(path)
     except Exception as exc:  # noqa: BLE001 — surface any render/IO failure to the UI
         message = f"Could not save figure: {exc}"
         if status is not None:
@@ -60,6 +60,12 @@ def save_figure_dialog(parent, render, *, title="Save figure", status=None):
         else:
             QtWidgets.QMessageBox.warning(parent, "Save failed", message)
         return None
+    if fig is not None:
+        # The figure was only ever a means to the file; don't leak it into
+        # matplotlib's global registry.
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
     if status is not None:
         status.setText(f"Saved {path}")
     return path

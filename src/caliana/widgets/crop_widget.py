@@ -16,8 +16,8 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
-from .. import roi as roi_mod
-from ._plot import FrameTimeAxis
+from .. import figures
+from ._plot import FrameTimeAxis, dff0, frame_interval
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -35,10 +35,10 @@ class CropTracesWidget(QtWidgets.QWidget):
         self.resize(940, 560)
 
         # Preview the full (uncropped) traces so the whole recording is visible
-        # and the window is chosen in original frame coordinates.
-        self._preview = roi_mod.extract_all_traces(
-            session._working_stack(), session.rois
-        )
+        # and the window is chosen in original frame coordinates. Extracted through
+        # the session's own path, so a motion-tracked session previews the same
+        # signal the crop will actually produce.
+        self._preview = session._extract_window()
         self._n_frames = self._preview.raw.shape[1]
         # Result defaults to the session's current traces so closing without
         # cropping is a no-op for the caller.
@@ -118,18 +118,13 @@ class CropTracesWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------- helpers
     def _frame_interval(self):
-        tl = self.session.timeline
-        return tl.frame_interval if (tl is not None and tl.frame_interval) else None
+        return frame_interval(self.session)
 
     def _preview_data(self):
         """The array plotted: a ΔF/F preview if requested, else the raw traces."""
-        raw = self._preview.raw
         if not self.show_dff.isChecked():
-            return raw, "mean intensity"
-        f0 = raw[:, :1]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            dff = np.where(f0 != 0, (raw - f0) / f0, 0.0)
-        return dff, "ΔF/F₀"
+            return self._preview.raw, "mean intensity"
+        return dff0(self._preview.raw), "ΔF/F₀"
 
     # ------------------------------------------------------------- drawing
     def _redraw_traces(self):
@@ -209,15 +204,10 @@ class CropTracesWidget(QtWidgets.QWidget):
         labels = list(self._preview.labels)
 
         def render(path):
-            from .. import figures
-
-            fig = figures.export_traces(
-                [data[i] for i in range(data.shape[0])], x=x, xlabel=xlabel,
-                ylabel=ylabel, labels=labels, regions=regions, save=path,
+            return figures.export_traces(
+                list(data), x=x, xlabel=xlabel, ylabel=ylabel, labels=labels,
+                regions=regions, save=path,
             )
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
 
         save_figure_dialog(self, render, title="Save traces", status=self.status)
 

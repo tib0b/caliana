@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Optional, Sequence
+from typing import Optional
 
 import numpy as np
-
-from .models import ROIShape
 
 # Okabe-Ito colourblind-safe palette
 # Shared by every figure function so an ROI is the same colour in the
@@ -96,45 +94,6 @@ def _finish(fig, save: Optional[str], dpi: int):
     return fig
 
 
-def _time_axis(session):
-    """(x, label) — real seconds if the Timeline is calibrated, else frames.
-
-    Follows the current (possibly cropped) traces via each column's original frame
-    index (``Session.trace_frames``), so ``x`` always matches the trace length and
-    a cropped window plots against its true recording frames/seconds.
-    """
-    frames = session.trace_frames()
-    tl = session.timeline
-    if tl is not None and tl.frame_interval:
-        return frames * tl.frame_interval, "Time (s)"
-    return frames, "Frame"
-
-
-def _event_overlay(ax, session, x):
-    """Draw stimulus/event markers as thin labelled lines at their frame index.
-
-    Events are in original frame coordinates; only those falling inside the
-    plotted (possibly cropped) window are drawn, positioned on the same
-    frame/seconds axis as the traces.
-    """
-    tl = session.timeline
-    if tl is None or not tl.events or len(x) == 0:
-        return
-    frames = session.trace_frames()
-    lo, hi = int(frames[0]), int(frames[-1])
-    scale = tl.frame_interval if tl.frame_interval else 1.0
-    for ev in tl.events:
-        if lo <= ev.frame <= hi:
-            xv = ev.frame * scale
-            ax.axvline(xv, color="0.4", lw=0.7, ls="--", zorder=0)
-            if ev.label:
-                ax.annotate(
-                    ev.label, xy=(xv, 1.0), xycoords=("data", "axes fraction"),
-                    xytext=(2, -2), textcoords="offset points",
-                    fontsize=6, color="0.4", va="top", rotation=0,
-                )
-
-
 # Clean matplotlib renderings that mirror the live pyqtgraph views — same data,
 # overlays, and which-series-shown — restyled with the paper rcParams and the
 # Okabe-Ito palette.
@@ -186,8 +145,6 @@ def _overlay_legend(ax, overlays):
                     handlelength=0, handletextpad=0)
     for text, ov in zip(leg.get_texts(), overlays):
         text.set_color(ov.get("color", "white"))
-
-
 
 
 def export_image(image, *, levels=None, cmap="gray", cbar_label=None,

@@ -32,14 +32,25 @@ tests can drive it without a mouse.
 """
 from __future__ import annotations
 
+from typing import NamedTuple, Optional
+
 import numpy as np
 import pyqtgraph as pg
 
+from .. import figures
 from ..models import BaselineMethod
-from ._plot import FrameTimeAxis
+from ._plot import FrameTimeAxis, frame_interval
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
+
+
+class _Displayed(NamedTuple):
+    """Which trace array the plot is showing, and how to label/analyse it."""
+    signal: str                        # "smoothed" | "dff" | "raw" (analysis.py name)
+    data: Optional[np.ndarray]         # [n_roi, T]; None when no traces exist
+    labels: list
+    ylabel: str
 
 
 class AnalysisWidget(QtWidgets.QWidget):
@@ -381,22 +392,27 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._redraw_traces()
 
     # ------------------------------------------------------------- helpers
-    def _display_data(self):
-        """The array currently plotted: smoothed, else ΔF/F, else raw — in that
-        priority, each gated on its checkbox and on having been computed."""
+    def _displayed(self) -> _Displayed:
+        """What the trace plot currently shows: smoothed, else ΔF/F, else raw — in
+        that priority, each gated on its checkbox and on having been computed.
+
+        The single place that ladder lives, so the plot, the exported figure and
+        the onset detector in ``compute_propagation`` can never disagree about
+        which signal is on screen.
+        """
         traces = self.session.traces
         if traces is None:
-            return None, []
+            return _Displayed("raw", None, [], "mean intensity")
         if self.show_smoothed.isChecked() and traces.smoothed is not None:
-            return traces.smoothed, traces.labels
+            return _Displayed("smoothed", traces.smoothed, traces.labels,
+                              f"ΔF/F (smoothed, σ={traces.smoothed_sigma:g})")
         if self.show_dff.isChecked() and traces.dff is not None:
-            return traces.dff, traces.labels
-        return traces.raw, traces.labels
+            return _Displayed("dff", traces.dff, traces.labels, "ΔF/F")
+        return _Displayed("raw", traces.raw, traces.labels, "mean intensity")
 
     def _frame_interval(self):
         """Seconds/frame if the Timeline is calibrated, else None (frames-only)."""
-        tl = self.session.timeline
-        return tl.frame_interval if (tl is not None and tl.frame_interval) else None
+        return frame_interval(self.session)
 
     def _time_unit(self) -> str:
         """Unit label for time readouts: 's' when calibrated, else 'frame'."""
@@ -469,19 +485,12 @@ class AnalysisWidget(QtWidgets.QWidget):
         if not self.session.rois:
             self.status.setText("No traces; place ROIs first.")
             return None
-        # Detect onsets on whatever the trace plot shows (smoothed → ΔF/F → raw), so
-        # the overlaid onset lines line up with the displayed curves.
-        traces = self.session.traces
-        if self.show_smoothed.isChecked() and traces is not None and traces.smoothed is not None:
-            signal = "smoothed"
-        elif self.show_dff.isChecked() and traces is not None and traces.dff is not None:
-            signal = "dff"
-        else:
-            signal = "raw"
+        # Detect onsets on whatever the trace plot shows, so the overlaid onset
+        # lines line up with the displayed curves.
         start = self._crop_start()  # region is in frames; traces index from 0
         lo, hi = sorted(int(round(v)) for v in self.prop_region.getRegion())
         result = self.session.cross_roi_propagation(
-            signal=signal, method=self.onset_method_box.currentText(),
+            signal=self._displayed().signal, method=self.onset_method_box.currentText(),
             frac=self.frac_box.value(), k=self.k_box.value(), d=self.d_box.value(),
             baseline_region=(lo - start, hi - start),
         )
@@ -676,7 +685,8 @@ class AnalysisWidget(QtWidgets.QWidget):
         elif in_plot:
             self.plot.removeItem(self.region)
 
-        data, labels = self._display_data()
+        shown = self._displayed()
+        data, labels = shown.data, shown.labels
         if data is None or data.shape[0] == 0:
             return
         n = data.shape[0]
@@ -685,14 +695,7 @@ class AnalysisWidget(QtWidgets.QWidget):
             curve = self.plot.plot(x, data[i], pen=pg.intColor(i, hues=max(6, n)),
                                    name=labels[i] if i < len(labels) else f"roi_{i}")
             self._curves.append(curve)
-        traces = self.session.traces
-        if self.show_smoothed.isChecked() and traces.smoothed is not None:
-            ylabel = f"ΔF/F (smoothed, σ={traces.smoothed_sigma:g})"
-        elif self.show_dff.isChecked() and traces.dff is not None:
-            ylabel = "ΔF/F"
-        else:
-            ylabel = "mean intensity"
-        self.plot.setLabel("left", ylabel)
+        self.plot.setLabel("left", shown.ylabel)
 
     # -------------------------------------------------------------- saving
     def _save_traces(self):
@@ -703,7 +706,8 @@ class AnalysisWidget(QtWidgets.QWidget):
         stimulus event lines, whichever baseline window is on the plot, and the
         per-ROI onset markers when propagation onsets are overlaid.
         """
-        data, labels = self._display_data()
+        shown = self._displayed()
+        data = shown.data
         if data is None or data.shape[0] == 0:
             self.status.setText("No traces to save.")
             return
@@ -712,14 +716,6 @@ class AnalysisWidget(QtWidgets.QWidget):
         scale = iv or 1
         x = (start + np.arange(data.shape[1])) * scale
         xlabel = "time (s)" if iv else "frame"
-
-        traces = self.session.traces
-        if self.show_smoothed.isChecked() and traces.smoothed is not None:
-            ylabel = f"ΔF/F (smoothed, σ={traces.smoothed_sigma:g})"
-        elif self.show_dff.isChecked() and traces.dff is not None:
-            ylabel = "ΔF/F"
-        else:
-            ylabel = "mean intensity"
 
         events = [(ev.frame * scale, ev.label) for ev, _ in self._event_lines]
         regions = []
@@ -737,16 +733,11 @@ class AnalysisWidget(QtWidgets.QWidget):
                       for t in np.asarray(prop["onsets"], dtype=float)]
 
         def render(path):
-            from .. import figures
-
-            fig = figures.export_traces(
-                [data[i] for i in range(data.shape[0])], x=x, xlabel=xlabel,
-                ylabel=ylabel, labels=list(labels), events=events,
-                regions=regions, onsets=onsets, save=path,
+            return figures.export_traces(
+                list(data), x=x, xlabel=xlabel, ylabel=shown.ylabel,
+                labels=list(shown.labels), events=events, regions=regions,
+                onsets=onsets, save=path,
             )
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
 
         save_figure_dialog(self, render, title="Save traces", status=self.status)
 
@@ -758,16 +749,11 @@ class AnalysisWidget(QtWidgets.QWidget):
             return
 
         def render(path):
-            from .. import figures
-
-            f = figures.export_scatter(
+            return figures.export_scatter(
                 fit["delay"], fit["dist"], xlabel=fit["xlabel"],
                 ylabel=fit["ylabel"], point_labels=fit["labels"],
                 fit=fit["fit"], title=fit["title"], save=path,
             )
-            import matplotlib.pyplot as plt
-
-            plt.close(f)
 
         save_figure_dialog(self, render, title="Save propagation figure",
                            status=self.status)
@@ -813,21 +799,27 @@ class AnalysisWidget(QtWidgets.QWidget):
         if not is_prop:       # leaving propagation
             self._clear_onsets()
 
-    def _on_onset_method_changed(self, method: str):
+    @staticmethod
+    def _enable_onset_params(method: str, frac, k, d) -> None:
         """Enable only the params a method uses: frac→fraction_of_max, k→std &
-        derivative, d→derivative."""
-        self.frac_label.setEnabled(method == "fraction_of_max")
-        self.frac_box.setEnabled(method == "fraction_of_max")
-        self.k_label.setEnabled(method in ("std", "derivative"))
-        self.k_box.setEnabled(method in ("std", "derivative"))
-        self.d_label.setEnabled(method == "derivative")
-        self.d_box.setEnabled(method == "derivative")
+        derivative, d→derivative. Each of ``frac``/``k``/``d`` is that param's
+        (label, spinbox) pair, so the trace page and the heatmap page — which own
+        separate widgets for the same three params — share one rule.
+        """
+        for widgets, used in ((frac, method == "fraction_of_max"),
+                              (k, method in ("std", "derivative")),
+                              (d, method == "derivative")):
+            for w in widgets:
+                w.setEnabled(used)
+
+    def _on_onset_method_changed(self, method: str):
+        self._enable_onset_params(
+            method, (self.frac_label, self.frac_box), (self.k_label, self.k_box),
+            (self.d_label, self.d_box),
+        )
 
     def _on_hm_method_changed(self, method: str):
-        """Heatmap counterpart of ``_on_onset_method_changed``."""
-        self.hm_frac_label.setEnabled(method == "fraction_of_max")
-        self.hm_frac_box.setEnabled(method == "fraction_of_max")
-        self.hm_k_label.setEnabled(method in ("std", "derivative"))
-        self.hm_k_box.setEnabled(method in ("std", "derivative"))
-        self.hm_d_label.setEnabled(method == "derivative")
-        self.hm_d_box.setEnabled(method == "derivative")
+        self._enable_onset_params(
+            method, (self.hm_frac_label, self.hm_frac_box),
+            (self.hm_k_label, self.hm_k_box), (self.hm_d_label, self.hm_d_box),
+        )

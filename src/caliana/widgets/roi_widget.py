@@ -22,10 +22,11 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
-from ..models import RegistrationMode, ROIShape
+from .. import figures
+from ..models import ROIShape
 from ..registration import map_point
 from ..roi import polygon_centroid
-from ._plot import FrameTimeAxis
+from ._plot import FrameTimeAxis, dff0, frame_interval
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -153,7 +154,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
             self._add_roi_graphic(roi)
         for i, leaf in enumerate(list(self.session.leaf_regions)):
             self._add_leaf_reference(i, leaf)
-        self.track_box.setEnabled(self._has_transforms())
+        self.track_box.setEnabled(self.session._has_transforms())
         self._refresh_traces()
 
     # ------------------------------------------------------- current controls
@@ -252,9 +253,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
             cx = pos.x() + size.x() / 2
             cy = pos.y() + size.y() / 2
         roi.center = (cy, cx)
-        if self.session.registration.mode.value == "per-leaf":
-            from ..roi import assign_roi_to_leaf
-            roi.leaf_region = assign_roi_to_leaf(roi, self.session.leaf_regions)
+        self.session.assign_leaf(roi)      # may have been dragged into another box
         record["text"].setPos(cx, cy)
         self._refresh_traces()
 
@@ -325,34 +324,18 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self._poly_points = []
 
     # --------------------------------------------------------- motion tracking
-    def _has_transforms(self) -> bool:
-        """Whether registration produced per-frame transforms to track."""
-        reg = self.session.registration
-        if reg.mode == RegistrationMode.WHOLE_FRAME:
-            return bool(reg.transforms)
-        if reg.mode == RegistrationMode.PER_LEAF:
-            return any(leaf.transforms for leaf in self.session.leaf_regions)
-        return False
-
     def _frame_transform(self, roi, frame: int):
-        """The (transform, y-origin, x-origin) acting on ``roi`` at ``frame``.
+        """The ``(transform, origin_yx)`` acting on ``roi`` at ``frame``, or None.
 
-        Per-leaf transforms are estimated in box-local coordinates, so the box's
-        top-left corner is returned as the origin to offset by; whole-frame
-        transforms use the full-image origin. None if nothing applies.
+        Which series applies to an ROI (global vs its leaf box, and the box-local
+        origin its transforms are expressed about) is decided by
+        ``Session._roi_transform_series``, the same lookup the headless tracked
+        extraction uses; this only picks the frame out of it.
         """
-        reg = self.session.registration
-        if reg.mode == RegistrationMode.WHOLE_FRAME:
-            if 0 <= frame < len(reg.transforms):
-                return reg.transforms[frame], 0.0, 0.0
-        elif reg.mode == RegistrationMode.PER_LEAF:
-            idx = roi.leaf_region
-            if idx is not None and 0 <= idx < len(self.session.leaf_regions):
-                leaf = self.session.leaf_regions[idx]
-                if 0 <= frame < len(leaf.transforms):
-                    y0, _y1, x0, _x1 = leaf.bbox
-                    return leaf.transforms[frame], float(y0), float(x0)
-        return None
+        transforms, origin = self.session._roi_transform_series(roi)
+        if transforms is None or not 0 <= frame < len(transforms):
+            return None
+        return transforms[frame], origin
 
     def _roi_raw_center(self, roi, frame: int):
         """Where ``roi``'s tissue sits in the raw frame ``frame`` -> (cy, cx).
@@ -363,25 +346,14 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         transform applies (e.g. an ROI in no leaf box).
         """
         info = self._frame_transform(roi, frame)
-        if info is None:
-            return roi.center
-        return self._raw_point(roi.center, *info)
+        return roi.center if info is None else map_point(roi.center, *info)
 
     def _roi_raw_vertices(self, roi, frame: int):
         """Polygon vertices mapped to their raw-frame positions (else the stored ones)."""
         info = self._frame_transform(roi, frame)
         if info is None:
             return roi.vertices
-        return [self._raw_point(v, *info) for v in roi.vertices]
-
-    @staticmethod
-    def _raw_point(point, tf, oy, ox):
-        """Map a (cy, cx) point through transform ``tf`` about box origin (oy, ox).
-
-        Delegates to ``registration.map_point`` so the on-screen tracked marker and
-        the headless tracked trace (``roi.extract_trace_tracked``) share one map.
-        """
-        return map_point(point, tf, (oy, ox))
+        return [map_point(v, *info) for v in roi.vertices]
 
     def _place_roi_item(self, record, cy, cx):
         """Move a circle/square ROI graphic so its centre lands at (cy, cx)."""
@@ -461,15 +433,14 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         Read-only here: ROIs are placed in Stage II, so the frame interval is set
         elsewhere (notebook or analysis widget); this just reflects it. SPEC §3.
         """
-        tl = self.session.timeline
-        interval = tl.frame_interval if tl is not None else None
+        interval = frame_interval(self.session)
         self._time_axis.set_frame_interval(interval)
         self.trace_plot.setLabel("bottom", "time (s)" if interval else "frame")
 
     def _refresh_traces(self):
         """Live preview: redraw every ROI as ΔF/F0 with F0 = the first frame.
 
-        Display-only normalization ((F - F[0]) / F[0]) so the response is
+        Display-only normalization (see ``_plot.dff0``) so the response is
         comparable across ROIs regardless of brightness; the stored/exported
         traces remain raw mean intensity (SPEC §3).
         """
@@ -478,12 +449,10 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         if not self.session.rois:
             return
         traces = self.session.extract_traces()
-        n = traces.raw.shape[0]
+        data = dff0(traces.raw)
+        n = data.shape[0]
         for i in range(n):
-            raw = traces.raw[i]
-            f0 = float(raw[0])
-            dff = (raw - f0) / f0 if f0 else np.zeros_like(raw)
-            self.trace_plot.plot(dff, pen=pg.intColor(i, hues=max(6, n)),
+            self.trace_plot.plot(data[i], pen=pg.intColor(i, hues=max(6, n)),
                                  name=traces.labels[i])
 
     # -------------------------------------------------------------- saving
@@ -493,8 +462,6 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         Colours use the Okabe-Ito palette so an ROI matches its trace colour in
         the exported traces figure.
         """
-        from .. import figures
-
         labels = self.session.traces.labels if self.session.traces else None
         specs = []
         for i, roi in enumerate(self.session.rois):
@@ -535,43 +502,30 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         overlays = self._overlay_specs(frame)
 
         def render(path):
-            from .. import figures
-
-            fig = figures.export_image(image, levels=levels, cmap="gray",
-                                       overlays=overlays, save=path)
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
+            return figures.export_image(image, levels=levels, cmap="gray",
+                                        overlays=overlays, save=path)
 
         save_figure_dialog(self, render, title="Save ROI overlay", status=self.hint)
 
     def _save_traces(self):
         """Export the live ΔF/F₀ trace panel as shown (WYSIWYG, clean palette).
 
-        Reproduces the panel's display-only normalization ((F − F[0]) / F[0]);
-        the stored/exported traces themselves remain raw mean intensity (SPEC §3).
+        Reproduces the panel's display-only normalization (``_plot.dff0``); the
+        stored/exported traces themselves remain raw mean intensity (SPEC §3).
         """
         if not self.session.rois:
             self.hint.setText("Place an ROI first.")
             return
         traces = self.session.extract_traces()
-        dff0 = []
-        for raw in traces.raw:
-            f0 = float(raw[0])
-            dff0.append((raw - f0) / f0 if f0 else np.zeros_like(raw))
-        tl = self.session.timeline
-        iv = tl.frame_interval if (tl is not None and tl.frame_interval) else None
-        x = np.arange(traces.raw.shape[1]) * (iv or 1)
+        data = dff0(traces.raw)
+        iv = frame_interval(self.session)
+        x = np.arange(data.shape[1]) * (iv or 1)
         xlabel = "time (s)" if iv else "frame"
 
         def render(path):
-            from .. import figures
-
-            fig = figures.export_traces(dff0, x=x, xlabel=xlabel, ylabel="ΔF/F₀",
-                                        labels=list(traces.labels), save=path)
-            import matplotlib.pyplot as plt
-
-            plt.close(fig)
+            return figures.export_traces(list(data), x=x, xlabel=xlabel,
+                                         ylabel="ΔF/F₀",
+                                         labels=list(traces.labels), save=path)
 
         save_figure_dialog(self, render, title="Save ROI traces", status=self.hint)
 

@@ -1,7 +1,32 @@
-"""Shared pyqtgraph helpers for the interactive widgets. SPEC.md §3 time axis."""
+"""Helpers shared by the interactive widgets: session-to-plot adapters (time axis,
+display normalization) and pyqtgraph subclasses. SPEC.md §3 time axis."""
 from __future__ import annotations
 
+import numpy as np
 import pyqtgraph as pg
+
+
+def frame_interval(session) -> float | None:
+    """The session's seconds-per-frame, or None when the axis is frames-only.
+
+    Collapses "no Timeline" and "uncalibrated Timeline" into the single ``None``
+    every widget actually branches on.
+    """
+    tl = session.timeline
+    return tl.frame_interval if (tl is not None and tl.frame_interval) else None
+
+
+def dff0(raw) -> np.ndarray:
+    """Display-only normalization of ``[n_roi, T]`` raw F to (F − F[0]) / F[0].
+
+    Makes responses comparable across ROIs regardless of brightness in the live
+    previews; rows whose first frame is 0 come back flat rather than inf/NaN. The
+    stored and exported traces stay raw mean intensity (SPEC §3).
+    """
+    raw = np.asarray(raw, dtype=float)
+    f0 = raw[:, :1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(f0 != 0, (raw - f0) / f0, 0.0)
 
 
 class FrameTimeAxis(pg.AxisItem):

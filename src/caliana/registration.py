@@ -253,6 +253,9 @@ def apply_transforms(stack: np.ndarray, transforms: list[RigidTransform]) -> np.
         raise ValueError(
             f"transforms ({len(transforms)}) must match frames ({len(stack)})"
         )
+    # The model only matters for *estimating* a transform; `transform` just applies
+    # the 3x3 tmat we hand it, so one instance warps translation/rigid/scaled-
+    # rotation/affine matrices alike.
     sr = StackReg(StackReg.RIGID_BODY)
     out = np.empty(np.shape(stack), dtype=float)
     for i, (frame, tf) in enumerate(zip(stack, transforms)):
