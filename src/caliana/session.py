@@ -18,12 +18,12 @@ from . import analysis, export, io
 from . import registration as registration_mod
 from . import roi as roi_mod
 from .models import (
+    ROI,
     BaselineMethod,
     ImportParams,
     LeafRegion,
     RegistrationMode,
     RegistrationResult,
-    ROI,
     ROIShape,
     Traces,
 )
@@ -400,10 +400,14 @@ class Session:
 
     # ------------------------------------------------------------------ Export
     def provenance(self) -> dict:
-        """Full parameter record (source, registration, ROIs, crop, events) as a dict."""
+        """Full parameter record (version, source, registration, ROIs, crop, events)
+        as a dict."""
+        from . import __version__  # deferred: __init__ imports this module
+
         src = self.source
         events = self.timeline.events if self.timeline else []
         return {
+            "caliana_version": __version__,
             "source": None if src is None else {
                 "path": str(src.path),
                 "import_params": vars(src.import_params),

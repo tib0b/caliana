@@ -25,9 +25,6 @@ dependencies = [
     "qtpy",
     "pyqtgraph",
     "PySide6",
-    # Onset / change-point analyses (caliana/analysis.py)
-    "ruptures",
-    "scikit-image",
     # Publication-grade static figures (matplotlib) — see caliana/figures.py
     "matplotlib",
 ]
