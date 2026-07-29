@@ -33,6 +33,8 @@ def test_fraction_of_max_frac_one_returns_time_to_peak():
 
 def test_propagation_speed_and_direction():
     # Known arrival-time field: onset = 5 + 0.2*x + 0.1*y  -> slowness (dy,dx)=(0.1,0.2)
+    # ROIs span both axes, so the free 2D plane fit ("auto") is the right mode and
+    # can recover a direction that lies along neither ROI row nor column.
     coords = [(10, 10), (10, 30), (30, 10), (30, 30)]  # (y, x)
     onsets = [5 + 0.2 * x + 0.1 * y for (y, x) in coords]
     T = 80
@@ -40,7 +42,8 @@ def test_propagation_speed_and_direction():
     traces = Traces(raw=dff.copy(), dff=dff, labels=[f"r{i}" for i in range(4)])
     rois = [ROI(center=c, size=3, shape=ROIShape.CIRCLE) for c in coords]
 
-    res = cross_roi_propagation(traces, rois, signal="dff", frac=0.5)
+    res = cross_roi_propagation(traces, rois, signal="dff", frac=0.5,
+                                direction_mode="auto")
 
     expected_speed = 1.0 / np.hypot(0.2, 0.1)        # ~4.47 px/frame
     assert abs(res["speed_px_per_frame"] - expected_speed) / expected_speed < 0.1
@@ -49,8 +52,63 @@ def test_propagation_speed_and_direction():
     got = np.array(res["direction"])
     assert np.dot(got, exp_dir) > 0.99               # near-parallel
 
+    assert res["direction_mode"] == "auto"
     assert res["source_roi"] == 0                    # earliest onset at (10,10)
     assert len(res["pairwise"]) == 6                 # 4 choose 2
+
+
+def test_propagation_collinear_rois_follow_the_roi_line():
+    # ROIs strung along one line (the usual layout: placed along the propagation
+    # path). The free 2D plane fit is underdetermined across the line, so the
+    # default "roi_line" mode constrains the direction to the line itself.
+    coords = [(10, 10), (20, 20), (30, 30), (40, 40)]     # (y, x): 45° line
+    onsets = [5.0, 15.0, 25.0, 35.0]                      # 10 frames per step
+    T = 80
+    dff = np.stack([_logistic_step(T, o, tau=0.6) for o in onsets])
+    traces = Traces(raw=dff.copy(), dff=dff, labels=[f"r{i}" for i in range(4)])
+    rois = [ROI(center=c, size=3, shape=ROIShape.CIRCLE) for c in coords]
+
+    res = cross_roi_propagation(traces, rois, signal="dff", frac=0.5)
+
+    assert res["direction_mode"] == "roi_line"            # the default
+    exp_dir = np.array([1.0, 1.0]) / np.sqrt(2)           # along +y/+x, toward later
+    got = np.array(res["direction"])
+    assert np.dot(got, exp_dir) > 0.999
+    # 10 px of travel (√2·10 along the diagonal) per 10 frames.
+    expected_speed = np.hypot(10.0, 10.0) / 10.0
+    assert abs(res["speed_px_per_frame"] - expected_speed) / expected_speed < 0.05
+    assert res["source_roi"] == 0
+
+
+def test_propagation_roi_line_ignores_off_axis_scatter():
+    # ROIs along +x with small y jitter, all responding on the same +x schedule.
+    # The jitter gives the plane fit a spurious y gradient; constraining the fit to
+    # the ROI line keeps the direction on +x.
+    coords = [(10, 0), (11, 20), (9, 40), (11, 60)]       # (y, x)
+    onsets = [0.0, 10.0, 20.0, 30.0]                      # 2 px/frame along +x
+    T = 80
+    dff = np.stack([_logistic_step(T, o + 5, tau=0.6) for o in onsets])
+    traces = Traces(raw=dff.copy(), dff=dff, labels=[f"r{i}" for i in range(4)])
+    rois = [ROI(center=c, size=3, shape=ROIShape.CIRCLE) for c in coords]
+
+    res = cross_roi_propagation(traces, rois, signal="dff", frac=0.5)
+
+    got = np.array(res["direction"])
+    assert abs(got[0]) < 0.1 and got[1] > 0.99            # essentially pure +x
+    assert abs(res["speed_px_per_frame"] - 2.0) / 2.0 < 0.1
+
+
+def test_propagation_rejects_unknown_direction_mode():
+    coords = [(10, 10), (10, 30)]
+    dff = np.stack([_logistic_step(40, o, tau=0.6) for o in (10.0, 20.0)])
+    traces = Traces(raw=dff.copy(), dff=dff, labels=["a", "b"])
+    rois = [ROI(center=c, size=3, shape=ROIShape.CIRCLE) for c in coords]
+    try:
+        cross_roi_propagation(traces, rois, signal="dff", direction_mode="sideways")
+    except ValueError as exc:
+        assert "sideways" in str(exc)
+    else:
+        raise AssertionError("unknown direction_mode must raise ValueError")
 
 
 def test_propagation_two_rois_speed_and_direction():
@@ -195,6 +253,9 @@ if __name__ == "__main__":
     test_onset_time_recovers_crossing()
     test_fraction_of_max_frac_one_returns_time_to_peak()
     test_propagation_speed_and_direction()
+    test_propagation_collinear_rois_follow_the_roi_line()
+    test_propagation_roi_line_ignores_off_axis_scatter()
+    test_propagation_rejects_unknown_direction_mode()
     test_propagation_two_rois_speed_and_direction()
     test_propagation_two_rois_direction_flips_with_order()
     test_no_response_gives_nan_onset()

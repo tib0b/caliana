@@ -352,7 +352,8 @@ class Session:
         """Estimate signal propagation across ROIs; stores it under ``analyses``.
 
         Keyword args are forwarded to ``analysis.cross_roi_propagation``
-        (``signal``, ``method``, ``frac``, ``k``, ``d``, ``baseline_region``).
+        (``signal``, ``method``, ``frac``, ``k``, ``d``, ``baseline_region``,
+        ``direction_mode``).
         """
         if self.traces is None:
             self.extract_traces()

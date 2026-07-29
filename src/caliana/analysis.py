@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .models import BaselineMethod, ROI, Traces
+from .models import ROI, BaselineMethod, Traces
 
 
 def compute_dff(
@@ -234,6 +234,21 @@ def onset_time_map(
     return onset.reshape(Yb, Xb)
 
 
+def roi_line_axis(coords: np.ndarray) -> np.ndarray | None:
+    """Unit vector ``(dy, dx)`` of the best-fit line through ROI centres.
+
+    The principal axis of the centred point cloud (first right-singular vector),
+    i.e. the direction of greatest spread — for two ROIs, exactly the line joining
+    them. Returns ``None`` when the centres coincide, leaving no line to fit.
+    """
+    coords = np.asarray(coords, dtype=float)
+    centred = coords - coords.mean(axis=0)
+    if not np.any(np.abs(centred) > 1e-12):
+        return None
+    *_, vt = np.linalg.svd(centred, full_matrices=False)
+    return vt[0]
+
+
 def cross_roi_propagation(
     traces: Traces,
     rois: list[ROI],
@@ -243,18 +258,37 @@ def cross_roi_propagation(
     k: float = 3.0,
     d: float = 0.0,
     baseline_region: tuple[int, int] | None = None,
+    direction_mode: str = "roi_line",
 ) -> dict:
     """Estimate signal propagation across ROIs from per-ROI onset timing.
 
-    Detects each ROI's onset (``onset_time``) and fits ``onset = a*x + b*y + c``
-    over ROI centres. Returns a dict with per-ROI ``onsets``, the earliest
+    Detects each ROI's onset (``onset_time``) and regresses those onsets against
+    ROI centre position. Returns a dict with per-ROI ``onsets``, the earliest
     ``source_roi``, ``speed_px_per_frame``, a ``direction`` unit vector ``(dy, dx)``
-    toward later onset, and ``pairwise`` speeds.
+    toward later onset, the ``direction_mode`` used, and ``pairwise`` speeds.
+
+    direction_mode: how the propagation direction is decided.
+      - ``"roi_line"`` (default): constrain it to the line the ROIs lie on (their
+        principal axis, ``roi_line_axis``) and fit onset against position along
+        that line. Intended for ROIs deliberately placed along the propagation
+        path — the usual layout, and the robust choice there.
+      - ``"auto"``: fit the plane ``onset = a*x + b*y + c`` over the centres and
+        take the direction from its gradient, letting the data pick any 2D
+        direction. Needs ROIs spread in two dimensions: for (near-)collinear ROIs
+        the perpendicular component is unconstrained, so the recovered direction
+        can come out arbitrary — even perpendicular to the ROI line.
+
+    Both modes fall back to the ROI-to-ROI line when only two ROIs respond (a
+    plane is underdetermined there).
 
     signal: ``"smoothed"`` (``traces.smoothed``), ``"dff"`` (``traces.dff``), or
         ``"raw"`` — each falls back to ``raw`` if the requested array isn't computed.
     method / frac / k / d / baseline_region: passed to ``onset_time``.
     """
+    if direction_mode not in ("roi_line", "auto"):
+        raise ValueError(
+            f"Unknown direction_mode {direction_mode!r} (expected 'roi_line' | 'auto')"
+        )
     if signal == "smoothed" and traces.smoothed is not None:
         data = traces.smoothed
     elif signal == "dff" and traces.dff is not None:
@@ -277,6 +311,7 @@ def cross_roi_propagation(
     result: dict = {
         "onsets": onsets,
         "method": method,
+        "direction_mode": direction_mode,
         "source_roi": int(np.nanargmin(onsets)) if nv else None,
         "speed_px_per_frame": None,
         "direction": None,
@@ -295,7 +330,23 @@ def cross_roi_propagation(
                 "speed_px_per_frame": dist / abs(dt) if dt != 0 else float("inf"),
             })
 
-    if nv >= 3:
+    if direction_mode == "roi_line" and nv >= 2:
+        # Direction is fixed to the ROI line; only the slowness *along* it is fitted,
+        # so collinear ROIs (the intended layout) stay well-posed.
+        X = coords[valid]
+        axis = roi_line_axis(X)
+        if axis is not None:
+            u = X @ axis                                  # position along the line
+            A = np.column_stack([u, np.ones(nv)])
+            (slope, _c), *_ = np.linalg.lstsq(A, onsets[valid], rcond=None)
+            if abs(slope) > 1e-9:                         # slope = frames per px
+                result["speed_px_per_frame"] = float(1.0 / abs(slope))
+                # Orient the axis toward later onset (u grows with onset iff slope>0).
+                step = axis if slope > 0 else -axis
+                result["direction"] = (float(step[0]), float(step[1]))
+            else:
+                result["speed_px_per_frame"] = float("inf")
+    elif nv >= 3:
         X = coords[valid]
         A = np.column_stack([X[:, 1], X[:, 0], np.ones(nv)])  # [x, y, 1]
         (a_x, b_y, _c), *_ = np.linalg.lstsq(A, onsets[valid], rcond=None)

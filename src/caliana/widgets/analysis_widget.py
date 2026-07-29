@@ -16,8 +16,12 @@ Two tabbed pages:
     the level onsets are measured from; overlay per-ROI onset times, summarise
     speed / direction / source ROI, and plot distance-along-propagation vs onset
     delay with the line implied by that speed and its R². Onsets are detected on the
-    signal currently displayed (raw / ΔF/F / smoothed). Time readouts switch to
-    seconds when a frame interval is set.
+    signal currently displayed (raw / ΔF/F / smoothed). "Direction" picks how the
+    propagation vector is found: along the line the ROIs sit on (default — only the
+    speed along it is fitted, so ROIs placed along the propagation path stay
+    well-posed) or automatically from a 2D plane fit over the ROI centres (which
+    needs ROIs spread in two dimensions). Time readouts switch to seconds when a
+    frame interval is set.
 - Mark optional stimulus events as draggable vertical lines.
 
 **Heatmaps** — dataset-wide (not per-ROI) maps. Currently a per-pixel onset-time
@@ -43,6 +47,13 @@ from ._plot import FrameTimeAxis, frame_interval
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
+
+# Propagation direction modes: combo label -> analysis.cross_roi_propagation name.
+# Insertion order is the combo order, so the first entry is the default.
+_DIRECTION_MODES = {
+    "along ROI line": "roi_line",
+    "automatic (2D fit)": "auto",
+}
 
 
 class _Displayed(NamedTuple):
@@ -348,6 +359,19 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.d_box.setToolTip("derivative threshold = baseline_deriv_mean + k·baseline_deriv_std + d")
         row.addWidget(self.d_box)
 
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("Direction:"))
+        self.prop_dir_box = QtWidgets.QComboBox()
+        self.prop_dir_box.addItems(list(_DIRECTION_MODES))   # ROI line first = default
+        self.prop_dir_box.setToolTip(
+            "Along ROI line: the direction is fixed to the line the ROIs sit on and "
+            "only the speed along it is fitted — right when ROIs are placed along the "
+            "propagation path.\nAutomatic: fit a 2D plane over the ROI centres and "
+            "take its gradient; needs ROIs spread in two dimensions, as collinear "
+            "ROIs leave the direction underdetermined."
+        )
+        row.addWidget(self.prop_dir_box)
+
         self.prop_btn = QtWidgets.QPushButton("Propagation")
         self.prop_btn.clicked.connect(self.compute_propagation)
         row.addWidget(self.prop_btn)
@@ -493,6 +517,7 @@ class AnalysisWidget(QtWidgets.QWidget):
             signal=self._displayed().signal, method=self.onset_method_box.currentText(),
             frac=self.frac_box.value(), k=self.k_box.value(), d=self.d_box.value(),
             baseline_region=(lo - start, hi - start),
+            direction_mode=_DIRECTION_MODES[self.prop_dir_box.currentText()],
         )
         self._overlay_onsets(result["onsets"])
         self._plot_propagation_fit(result)
@@ -659,6 +684,12 @@ class AnalysisWidget(QtWidgets.QWidget):
         if result["direction"]:
             lines.append("direction (dy, dx): "
                          f"({result['direction'][0]:.3f}, {result['direction'][1]:.3f})")
+        # Name the mode the direction came from — the same onsets give different
+        # directions under a ROI-line fit and a free 2D fit.
+        mode = result.get("direction_mode")
+        label = next((k for k, v in _DIRECTION_MODES.items() if v == mode), mode)
+        if label:
+            lines.append(f"direction mode: {label}")
         if result["source_roi"] is not None:
             src = labels[result["source_roi"]]
             lines.append(f"source (earliest): {src}")

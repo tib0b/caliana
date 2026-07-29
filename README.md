@@ -43,6 +43,8 @@ s.add_roi(center=(32, 32), size=4, label="centre")
 s.extract_traces()
 s.compute_dff(n=12)
 res = s.cross_roi_propagation(signal="dff")     # speed, direction, source ROI
+# direction_mode="roi_line" (default) fits the speed along the line the ROIs sit
+# on; "auto" fits a free 2D direction, which needs ROIs spread in two dimensions.
 s.export_traces("traces.csv")
 s.export_provenance("provenance.json")
 ```

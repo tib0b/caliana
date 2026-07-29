@@ -540,6 +540,50 @@ def test_analysis_widget_propagation_uses_displayed_signal():
     print("analysis widget propagation displayed-signal OK")
 
 
+def test_analysis_widget_propagation_direction_mode():
+    """The Direction combo picks how the propagation vector is found. It defaults
+    to the ROI line, which for ROIs strung along one line keeps the direction on
+    that line — where the free 2D fit can swing off it."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+
+    # ROIs in a straight horizontal line, responding left to right (+x).
+    rng = np.random.default_rng(7)
+    T, Y, X = 40, 14, 24
+    stack = rng.normal(10, 0.3, (T, Y, X))
+    centers = [(7, 4), (7, 9), (7, 14), (7, 19)]
+    for i, (cy, cx) in enumerate(centers):
+        stack[12 + 4 * i:, cy - 1:cy + 2, cx - 1:cx + 2] += 20.0
+    s = caliana.Session()
+    s.data = stack.astype(np.float32)
+    s.timeline = caliana.Timeline(n_frames=T)
+    for c in centers:
+        s.add_roi(center=c, size=3)
+
+    w = AnalysisWidget(s)
+    w.analysis_box.setCurrentText("Cross-ROI propagation")
+    w.prop_region.setRegion((0, 10))
+
+    # Default: along the ROI line -> direction is the +x line the ROIs sit on.
+    assert w.prop_dir_box.currentText() == "along ROI line"
+    res_line = w.compute_propagation()
+    assert res_line["direction_mode"] == "roi_line"
+    dy, dx = res_line["direction"]
+    assert abs(dy) < 1e-6 and dx > 0.999      # exactly along +x, toward later onset
+    assert "along ROI line" in w.results.toPlainText()
+
+    # Switching to the automatic 2D fit reaches the plane-fit path.
+    w.prop_dir_box.setCurrentText("automatic (2D fit)")
+    res_auto = w.compute_propagation()
+    assert res_auto["direction_mode"] == "auto"
+    assert np.allclose(res_auto["onsets"], res_line["onsets"], equal_nan=True)
+
+    w.close()
+    print("analysis widget propagation direction mode OK")
+
+
 def test_analysis_widget_derivative_onset():
     """The 'derivative' onset method is selectable on both panels: it gates k+d
     (not frac), and the heatmap it produces matches onset_time per pixel."""
@@ -599,4 +643,5 @@ if __name__ == "__main__":
     test_analysis_widget_analysis_selection()
     test_analysis_widget_onset_heatmap()
     test_analysis_widget_propagation_uses_displayed_signal()
+    test_analysis_widget_propagation_direction_mode()
     test_analysis_widget_derivative_onset()
