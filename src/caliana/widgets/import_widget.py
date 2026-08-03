@@ -14,6 +14,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from .. import figures
+from ._plot import pixel_size
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -131,7 +132,8 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         def render(path):
             return figures.export_image(
                 image, levels=levels, cmap="inferno",
-                cbar_label="normalized max intensity", save=path,
+                cbar_label="normalized max intensity",
+                pixel_size=pixel_size(self.session), save=path,
             )
 
         save_figure_dialog(self, render, title="Save max-intensity image",

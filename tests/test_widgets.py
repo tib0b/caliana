@@ -584,6 +584,62 @@ def test_analysis_widget_propagation_direction_mode():
     print("analysis widget propagation direction mode OK")
 
 
+def test_analysis_widget_spatial_scale():
+    """The pixel-size box is the spatial twin of the frame-interval box: it
+    calibrates the session, relabels the propagation graph in µm, and combines
+    with the time axis into a µm/s speed — while the analysis stays px/frame."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+
+    # ROIs along a line, responding left to right, 5 px and 4 frames apart.
+    rng = np.random.default_rng(11)
+    T, Y, X = 40, 14, 24
+    stack = rng.normal(10, 0.3, (T, Y, X))
+    centers = [(7, 4), (7, 9), (7, 14), (7, 19)]
+    for i, (cy, cx) in enumerate(centers):
+        stack[12 + 4 * i:, cy - 1:cy + 2, cx - 1:cx + 2] += 20.0
+    s = caliana.Session()
+    s.data = stack.astype(np.float32)
+    s.timeline = caliana.Timeline(n_frames=T)
+    for c in centers:
+        s.add_roi(center=c, size=2)
+
+    w = AnalysisWidget(s)
+    w.show_dff.setChecked(True)
+    result = w.compute_propagation()
+    speed = result["speed_px_per_frame"]        # ~5 px / 4 frames
+    assert np.isfinite(speed)
+
+    # Uncalibrated: pixels and frames throughout.
+    assert w.prop_plot.getAxis("left").labelText.endswith("(px)")
+    assert w._speed_str(speed).endswith("px/frame")
+
+    # Pixel size alone -> µm distances, still per frame.
+    w.pixel_box.setValue(2.0)
+    assert s.space.pixel_size == 2.0            # the box calibrates the session
+    assert w.prop_plot.getAxis("left").labelText.endswith("(µm)")
+    assert w._speed_str(speed).endswith("µm/frame")
+
+    # Both axes -> µm/s, and the graph's y values are the px distances in µm.
+    w.interval_box.setValue(0.5)
+    assert w._speed_str(speed).endswith("µm/s")
+    assert abs(float(w._speed_str(speed).split()[0]) - speed * 2.0 / 0.5) < 1e-2
+    assert np.allclose(np.sort(np.abs(w._prop_fit["dist"])), [0.0, 10.0, 20.0, 30.0])
+
+    # The stored result never left pixels/frames.
+    assert s.analyses["propagation"]["speed_px_per_frame"] == speed
+
+    # Clearing the box goes back to pixels.
+    w.pixel_box.setValue(0.0)
+    assert s.space.pixel_size is None
+    assert w.prop_plot.getAxis("left").labelText.endswith("(px)")
+
+    w.close()
+    print("analysis widget spatial scale OK")
+
+
 def test_analysis_widget_derivative_onset():
     """The 'derivative' onset method is selectable on both panels: it gates k+d
     (not frac), and the heatmap it produces matches onset_time per pixel."""
@@ -645,3 +701,4 @@ if __name__ == "__main__":
     test_analysis_widget_propagation_uses_displayed_signal()
     test_analysis_widget_propagation_direction_mode()
     test_analysis_widget_derivative_onset()
+    test_analysis_widget_spatial_scale()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from .models import (
     BaselineMethod,
+    FileScale,
     ImportParams,
     LeafRegion,
     RegistrationMode,
@@ -24,6 +25,7 @@ from .models import (
     Traces,
 )
 from .session import Session
+from .space import SpatialScale
 from .timeline import Event, Timeline
 
 __version__ = "0.2.1"
@@ -31,6 +33,7 @@ __version__ = "0.2.1"
 __all__ = [
     "Session",
     "ImportParams",
+    "FileScale",
     "ROI",
     "ROIShape",
     "LeafRegion",
@@ -40,5 +43,6 @@ __all__ = [
     "BaselineMethod",
     "Timeline",
     "Event",
+    "SpatialScale",
     "__version__",
 ]

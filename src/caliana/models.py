@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -21,13 +20,32 @@ class ImportParams:
     """Downsample-on-load parameters. Units are pixels and frame indices only.
 
     Frames ``[start, end)`` are kept, then temporal/spatial downsampling applied.
+    See ``Session.load`` for the field-by-field guide and worked examples.
+
+    Order of operations (it matters — every later field indexes the result of the
+    earlier ones): ``channel`` → ``start``/``end`` → ``temporal_step`` →
+    ``spatial_window`` → ``spatial_step``. The temporal crop comes first so lazy
+    (nd2) reads only materialize the frames actually kept.
     """
     start: int = 0
-    end: Optional[int] = None              # exclusive; None => until the end
+    end: int | None = None              # exclusive; None => until the end
     temporal_step: int = 1                 # average every N frames (1 = no averaging)
     spatial_step: int = 1                  # keep every Nth pixel per axis (1 = full res)
-    spatial_window: Optional[tuple[int, int, int, int]] = None  # crop (y0, y1, x0, x1); None = full
+    spatial_window: tuple[int, int, int, int] | None = None  # crop (y0, y1, x0, x1); None = full
     channel: int = 0                       # which channel to keep (single-channel model)
+
+
+@dataclass
+class FileScale:
+    """Physical scale read from a file's metadata (``io.load_stack``).
+
+    Native to the file, i.e. *before* downsampling: ``Session.load`` multiplies
+    these by ``temporal_step``/``spatial_step`` to calibrate the Timeline and
+    SpatialScale of the loaded stack. ``None`` means the file carried no usable
+    metadata for that axis, which leaves that axis in frames/pixels.
+    """
+    pixel_size: float | None = None      # µm per pixel
+    frame_interval: float | None = None  # seconds per frame
 
 
 @dataclass
@@ -36,6 +54,7 @@ class SourceInfo:
     path: Path
     import_params: ImportParams = field(default_factory=ImportParams)
     metadata: dict = field(default_factory=dict)   # raw reader metadata; units ignored
+    scale: FileScale = field(default_factory=FileScale)  # native µm/px, s/frame if declared
 
 
 # --------------------------------------------------------------------------- #
@@ -59,8 +78,8 @@ class ROI:
     size: float                            # circle radius / square half-side, px
     shape: ROIShape = ROIShape.CIRCLE
     label: str = ""
-    leaf_region: Optional[int] = None      # index into Session.leaf_regions (per-leaf mode)
-    vertices: Optional[list[tuple[float, float]]] = None  # (y, x) polygon outline (POLYGON only)
+    leaf_region: int | None = None      # index into Session.leaf_regions (per-leaf mode)
+    vertices: list[tuple[float, float]] | None = None  # (y, x) polygon outline (POLYGON only)
 
 
 # --------------------------------------------------------------------------- #
@@ -85,7 +104,7 @@ class RigidTransform:
     dy: float = 0.0
     dx: float = 0.0
     theta: float = 0.0
-    matrix: Optional[np.ndarray] = None    # full 3x3 (raw→reference); overrides scalars when set
+    matrix: np.ndarray | None = None    # full 3x3 (raw→reference); overrides scalars when set
 
 
 @dataclass
@@ -98,7 +117,7 @@ class LeafRegion:
     bbox: tuple[int, int, int, int]                       # (y0, y1, x0, x1)
     label: str = ""
     transforms: list[RigidTransform] = field(default_factory=list)   # one per frame
-    reference: Optional[np.ndarray] = None                # mean/first of the sub-stack
+    reference: np.ndarray | None = None                # mean/first of the sub-stack
     low_confidence_frames: list[int] = field(default_factory=list)   # drift-out flag
 
 
@@ -127,12 +146,12 @@ class Traces:
     afterwards, to use a different baseline.
     """
     raw: np.ndarray                        # [n_roi, T] mean intensity inside each ROI
-    dff: Optional[np.ndarray] = None       # [n_roi, T] (F - F0)/F0
+    dff: np.ndarray | None = None       # [n_roi, T] (F - F0)/F0
     labels: list[str] = field(default_factory=list)
     # Gaussian-smoothed copy of `dff` (see `analysis.smooth_traces`), kept separate
     # so `dff` is never overwritten. None until smoothed.
-    smoothed: Optional[np.ndarray] = None            # [n_roi, T]
-    smoothed_sigma: Optional[float] = None           # Gaussian std dev used, in frames
+    smoothed: np.ndarray | None = None            # [n_roi, T]
+    smoothed_sigma: float | None = None           # Gaussian std dev used, in frames
 
     def __post_init__(self):
         if self.dff is None and self.raw.size:

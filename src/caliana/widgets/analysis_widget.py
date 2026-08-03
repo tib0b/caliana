@@ -43,7 +43,8 @@ import pyqtgraph as pg
 
 from .. import figures
 from ..models import BaselineMethod
-from ._plot import FrameTimeAxis, frame_interval
+from ..space import distance_units, speed_units
+from ._plot import FrameTimeAxis, frame_interval, pixel_size
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -126,8 +127,22 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.interval_box.setRange(0.0, 1e6)
         self.interval_box.setDecimals(4)
         self.interval_box.setSpecialValueText("frames")  # 0 ⇒ frames-only axis
+        self.interval_box.setToolTip(
+            "Seconds per frame of the loaded stack; 0 keeps the time axis in frames"
+        )
         self.interval_box.valueChanged.connect(self._on_interval_changed)
         row1.addWidget(self.interval_box)
+
+        row1.addWidget(QtWidgets.QLabel("Pixel size (µm):"))
+        self.pixel_box = QtWidgets.QDoubleSpinBox()
+        self.pixel_box.setRange(0.0, 1e6)
+        self.pixel_box.setDecimals(4)
+        self.pixel_box.setSpecialValueText("pixels")  # 0 ⇒ pixels-only distances
+        self.pixel_box.setToolTip(
+            "µm per pixel of the loaded stack; 0 keeps distances in pixels"
+        )
+        self.pixel_box.valueChanged.connect(self._on_pixel_size_changed)
+        row1.addWidget(self.pixel_box)
         row1.addStretch(1)
         layout.addLayout(row1)
 
@@ -410,9 +425,12 @@ class AnalysisWidget(QtWidgets.QWidget):
             self.hm_base_end.setRange(start, start + nframes)
             self.hm_base_start.setValue(start)
             self.hm_base_end.setValue(start + min(self.n_box.value(), nframes))
+        # Reflect calibration set in the notebook or read from the file metadata.
         tl = self.session.timeline
         if tl is not None and tl.frame_interval:
-            self.interval_box.setValue(tl.frame_interval)  # reflect notebook calibration
+            self.interval_box.setValue(tl.frame_interval)
+        if self.session.space.pixel_size:
+            self.pixel_box.setValue(self.session.space.pixel_size)
         self._redraw_traces()
 
     # ------------------------------------------------------------- helpers
@@ -438,6 +456,10 @@ class AnalysisWidget(QtWidgets.QWidget):
         """Seconds/frame if the Timeline is calibrated, else None (frames-only)."""
         return frame_interval(self.session)
 
+    def _pixel_size(self):
+        """µm/pixel if the SpatialScale is calibrated, else None (pixels-only)."""
+        return pixel_size(self.session)
+
     def _time_unit(self) -> str:
         """Unit label for time readouts: 's' when calibrated, else 'frame'."""
         return "s" if self._frame_interval() else "frame"
@@ -447,12 +469,25 @@ class AnalysisWidget(QtWidgets.QWidget):
         iv = self._frame_interval()
         return frames * iv if iv else frames
 
+    def _distance_units(self):
+        """``(factor, unit)`` taking pixel distances to µm when calibrated.
+
+        The space-axis twin of ``_to_time``/``_time_unit``, in one call because
+        the distance scale and its label are always needed together (axis labels
+        on the propagation graph, and its figure export).
+        """
+        return distance_units(self._pixel_size())
+
     def _speed_str(self, speed) -> str:
-        """Propagation speed as px/s when calibrated, else px/frame ('n/a' if unset)."""
+        """A px/frame propagation speed in the best available units.
+
+        Reads µm/s with both axes calibrated, and degrades one axis at a time
+        (µm/frame, px/s, px/frame). ``'n/a'`` when no speed could be estimated.
+        """
         if not isinstance(speed, float) or not np.isfinite(speed):
             return "n/a"
-        iv = self._frame_interval()
-        return f"{speed / iv:.3g} px/s" if iv else f"{speed:.3g} px/frame"
+        factor, unit = speed_units(self._pixel_size(), self._frame_interval())
+        return f"{speed * factor:.3g} {unit}"
 
     def _crop_start(self):
         """First original frame index of the current traces (0 if uncropped).
@@ -604,9 +639,11 @@ class AnalysisWidget(QtWidgets.QWidget):
         summary — the graph and the summary stay coherent by construction. R²
         reports how well that line explains the measured onsets. With no estimable
         direction/speed (fewer than two responding ROIs) the points are shown
-        against Euclidean distance and no line is drawn. The delay axis follows the
-        Timeline calibration so it reads in seconds when the frame interval is set
-        (SPEC §3 time axis). The view autoranges to fit all points.
+        against Euclidean distance and no line is drawn. Both axes follow their
+        calibration — seconds when the frame interval is set, µm when the pixel
+        size is (SPEC §3 axes) — so the fitted slope is exactly the speed the
+        summary reports, in whatever units that is. The view autoranges to fit all
+        points.
         """
         self.prop_plot.clear()
         src = result["source_roi"]
@@ -621,20 +658,23 @@ class AnalysisWidget(QtWidgets.QWidget):
                     and np.isfinite(speed) and speed > 0)
 
         delta = coords - coords[src]                    # (dy, dx) from the source
+        dfactor, dunit = self._distance_units()         # px -> µm when calibrated
         if coherent:
-            # Signed distance along the propagation direction (px).
-            dist = delta @ np.asarray(direction, dtype=float)
-            self.prop_plot.setLabel("left", "distance along propagation (px)")
+            # Signed distance along the propagation direction.
+            dist = (delta @ np.asarray(direction, dtype=float)) * dfactor
+            ylabel = f"distance along propagation ({dunit})"
         else:
-            dist = np.hypot(*delta.T)
-            self.prop_plot.setLabel("left", "distance from source (px)")
+            dist = np.hypot(*delta.T) * dfactor
+            ylabel = f"distance from source ({dunit})"
+        self.prop_plot.setLabel("left", ylabel)
 
         iv = self._frame_interval()
         scale = iv or 1.0
-        self.prop_plot.setLabel("bottom", "onset delay (s)" if iv else "onset delay (frame)")
+        xlabel = "onset delay (s)" if iv else "onset delay (frame)"
+        self.prop_plot.setLabel("bottom", xlabel)
 
         valid = ~np.isnan(onsets)
-        r = dist[valid]                               # distance (px) -> y-axis
+        r = dist[valid]                               # distance -> y-axis
         delay = (onsets[valid] - onsets[src]) * scale  # onset delay -> x-axis
         labels = self.session.traces.labels
         self.prop_plot.addItem(pg.ScatterPlotItem(
@@ -651,14 +691,17 @@ class AnalysisWidget(QtWidgets.QWidget):
         # measures how well that line matches the (noisy) onset delays.
         fit = None
         if coherent and delay.size >= 1:
-            delay_hat = (r / speed) * scale             # delay a perfect wave predicts
+            # Speed in the units the axes are drawn in, so the line's slope is
+            # literally the number in the legend and in the summary.
+            shown_speed = speed * speed_units(self._pixel_size(), iv)[0]
+            delay_hat = r / shown_speed                 # delay a perfect wave predicts
             ss_res = float(np.sum((delay - delay_hat) ** 2))
             ss_tot = float(np.sum((delay - delay.mean()) ** 2))
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
             dline = np.array([min(0.0, float(delay.min())), max(0.0, float(delay.max()))])
-            fit = (dline, (speed / scale) * dline,
+            fit = (dline, shown_speed * dline,
                    f"{self._speed_str(speed)} (R²={r2:.3f})")
-            self.prop_plot.plot(dline, (speed / scale) * dline,
+            self.prop_plot.plot(dline, shown_speed * dline,
                                 pen=pg.mkPen("#ff5050", width=2), name=fit[2])
 
         # Snapshot the scatter for a clean WYSIWYG export (see _save_propagation).
@@ -667,9 +710,8 @@ class AnalysisWidget(QtWidgets.QWidget):
             "dist": np.asarray(r, dtype=float),
             "labels": [labels[i] if i < len(labels) else f"roi_{i}"
                        for i in np.flatnonzero(valid)],
-            "xlabel": "onset delay (s)" if iv else "onset delay (frame)",
-            "ylabel": ("distance along propagation (px)" if coherent
-                       else "distance from source (px)"),
+            "xlabel": xlabel,
+            "ylabel": ylabel,
             "fit": fit,
             "title": "Distance vs onset delay",
         }
@@ -806,6 +848,31 @@ class AnalysisWidget(QtWidgets.QWidget):
             self.session.timeline.frame_interval = interval
         self._time_axis.set_frame_interval(interval)
         self.plot.setLabel("bottom", "time (s)" if interval else "frame")
+        self._refresh_propagation_units()
+
+    def _on_pixel_size_changed(self, value: float):
+        """Switch distance readouts between pixels and µm. SPEC §3 space axis.
+
+        The spatial twin of ``_on_interval_changed``: ROI coordinates stay in
+        pixels (nothing on screen moves), and the value goes to the session's
+        SpatialScale so the notebook, provenance and saved figures agree.
+        """
+        self.session.space.pixel_size = value or None
+        self._refresh_propagation_units()
+
+    def _refresh_propagation_units(self):
+        """Redraw an existing propagation result after a calibration change.
+
+        Its speed, graph axes and onset times are all reported in calibrated
+        units, so they would otherwise keep the units they were computed under.
+        The result itself (px/frame, frame onsets) is unchanged — only its
+        presentation.
+        """
+        prop = self.session.analyses.get("propagation")
+        if prop is None or self.session.traces is None:
+            return
+        self._plot_propagation_fit(prop)
+        self._write_propagation_summary(prop)
 
     def _on_baseline_changed(self, _text):
         self.n_box.setEnabled(BaselineMethod(self.baseline_box.currentText()) == BaselineMethod.FIRST_N)

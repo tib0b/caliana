@@ -76,7 +76,39 @@ def test_crop_time_axis_is_offset():
     assert rows[-1][:2] == ["59", "118.0"]        # last cropped frame -> 118 s
 
 
+def test_spatial_scale_converts_distances_and_speed():
+    """The space axis mirrors the time axis: uncalibrated distances stay in
+    pixels, a pixel size turns them into µm, and the two combine into µm/s
+    without the analysis itself leaving px/frame."""
+    from caliana.space import distance_units, speed_units
+
+    s = caliana.Session()
+    s.data = np.zeros((10, 8, 8))
+    s.timeline = caliana.Timeline(n_frames=10)
+
+    assert s.space.pixel_size is None and not s.space.calibrated
+    assert s.space.microns_for([1.0, 2.0]) is None
+    assert distance_units(None) == (1.0, "px")
+    assert speed_units(None, None) == (1.0, "px/frame")
+
+    s.set_pixel_size(2.5)
+    assert s.space.calibrated
+    assert np.allclose(s.space.microns_for([1.0, 2.0]), [2.5, 5.0])
+    assert distance_units(s.space.pixel_size) == (2.5, "µm")
+
+    # Each axis calibrates independently — all four unit combinations are valid.
+    assert speed_units(2.5, None) == (2.5, "µm/frame")
+    assert speed_units(None, 0.5) == (2.0, "px/s")
+    factor, unit = speed_units(2.5, 0.5)
+    assert unit == "µm/s" and factor == 5.0        # 1 px/frame = 2.5 µm / 0.5 s
+
+    # Calibration is recorded for provenance, both effective and as-loaded.
+    s.set_frame_interval(0.5)
+    assert s.provenance()["scale"] == {"frame_interval": 0.5, "pixel_size": 2.5}
+
+
 if __name__ == "__main__":
     test_spine()
     test_crop_time_axis_is_offset()
+    test_spatial_scale_converts_distances_and_speed()
     print("smoke test OK")

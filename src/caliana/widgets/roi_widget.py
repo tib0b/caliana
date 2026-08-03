@@ -26,7 +26,7 @@ from .. import figures
 from ..models import ROIShape
 from ..registration import map_point
 from ..roi import polygon_centroid
-from ._plot import FrameTimeAxis, dff0, frame_interval
+from ._plot import FrameTimeAxis, dff0, frame_interval, pixel_size
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -78,6 +78,9 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self.size_box = QtWidgets.QSpinBox()
         self.size_box.setRange(1, 200)
         self.size_box.setValue(5)
+        # ROI geometry stays in pixels (that is what the masks index); a
+        # calibrated session gets the µm equivalent as a suffix on the box.
+        self.size_box.setSuffix(self._size_suffix(self.size_box.value()))
         # Size is shared across all ROIs (applies to existing ones too).
         self.size_box.valueChanged.connect(self._on_size_changed)
         bar.addWidget(self.size_box)
@@ -208,11 +211,21 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self._roi_records.append(record)
         item.sigRegionChanged.connect(lambda it, rec=record: self._on_roi_moved(rec))
 
+    def _size_suffix(self, value: int) -> str:
+        """`" (= N µm)"` for the size box when the session has a pixel size, else ``""``.
+
+        Radii are set and stored in pixels; the suffix is the readout that makes
+        an ROI comparable to a physical structure on the leaf.
+        """
+        ps = pixel_size(self.session)
+        return f" (= {value * ps:g} µm)" if ps else ""
+
     def _on_size_changed(self, value):
         """Shared size: resize every ROI about its centre. SPEC §3 (fixed size).
 
         Polygon ROIs have their own outline and are left untouched.
         """
+        self.size_box.setSuffix(self._size_suffix(value))
         for rec in self._roi_records:
             if rec["model"].shape == ROIShape.POLYGON:
                 continue
@@ -503,7 +516,9 @@ class RoiSelectionWidget(QtWidgets.QWidget):
 
         def render(path):
             return figures.export_image(image, levels=levels, cmap="gray",
-                                        overlays=overlays, save=path)
+                                        overlays=overlays,
+                                        pixel_size=pixel_size(self.session),
+                                        save=path)
 
         save_figure_dialog(self, render, title="Save ROI overlay", status=self.hint)
 

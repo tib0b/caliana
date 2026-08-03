@@ -27,7 +27,18 @@ from .models import (
     ROIShape,
     Traces,
 )
+from .space import SpatialScale
 from .timeline import Timeline
+
+
+def _downsampled_scale(native: Optional[float], step: int) -> Optional[float]:
+    """A file's native scale expressed per *loaded* sample.
+
+    Downsampling by ``step`` makes each kept frame/pixel span ``step`` times as
+    much time/space, so a 0.5 µm/px file imported with ``spatial_step=2`` has
+    1.0 µm pixels. ``None`` (uncalibrated) stays ``None``.
+    """
+    return None if native is None else native * step
 
 
 class Session:
@@ -36,6 +47,9 @@ class Session:
         self.data: Optional[np.ndarray] = None          # [T, Y, X] raw downsampled
         self.registered_data: Optional[np.ndarray] = None  # stabilized stack; None until register(apply=True)
         self.timeline: Optional[Timeline] = None
+        # Space axis, the counterpart of `timeline`: µm/px of the loaded stack,
+        # uncalibrated until `load` reads it from the file or `set_pixel_size` sets it.
+        self.space = SpatialScale()
         self.registration = RegistrationResult()
         # When True, traces are extracted by moving each ROI with its leaf's
         # per-frame transform over the RAW stack (ROI-follows-tissue), instead of
@@ -52,18 +66,76 @@ class Session:
     # ----------------------------------------------------------------- Stage I
     @classmethod
     def from_file(cls, path, **import_kwargs) -> "Session":
-        """New Session with ``path`` loaded. Shorthand for ``Session().load(...)``."""
+        """New Session with ``path`` (``.tif``/``.tiff``/``.nd2``) loaded.
+
+        Shorthand for ``Session().load(...)``, and the normal entry point.
+
+        ``import_kwargs`` are ``ImportParams`` fields — the "downsample on load"
+        controls, so a multi-GB recording never has to fit in RAM. All are
+        optional; the default loads the file as-is:
+
+        start, end: keep frames ``[start, end)`` (``end=None`` ⇒ to the last
+            frame). Applied before anything else, so an nd2 only reads the frames
+            inside the window.
+        temporal_step: average every ``N`` frames into one (``1`` = off). An
+            average, not a decimation, so the discarded frames still contribute
+            SNR. Yields ``(end - start) // N`` frames, each ``N`` times longer.
+        spatial_step: keep every ``N``-th pixel along Y and X (``1`` = full
+            resolution). A stride subsample: cheap, and ``N``-times coarser.
+        spatial_window: ``(y0, y1, x0, x1)`` crop of the field of view in the
+            file's pixel coordinates (``None`` = whole frame).
+        channel: which channel to keep from a multi-channel file. Caliana is
+            single-channel throughout (no ratiometric math); ignored otherwise.
+
+        They apply in that order — ``channel`` → temporal crop → ``temporal_step``
+        → ``spatial_window`` → ``spatial_step`` — which is what makes them
+        composable: each acts on the result of the previous one. Note that
+        ``spatial_window`` is in *file* pixels but everything afterwards (ROI
+        centres, leaf boxes, event frames, ``set_crop``) is in the coordinates of
+        the loaded stack, i.e. after cropping and downsampling.
+
+        Physical scale is read from the file's metadata when present (nd2
+        acquisition settings; ImageJ/OME/resolution tags in TIFF) and adjusted for
+        the downsampling, so ``timeline.frame_interval`` and ``space.pixel_size``
+        are calibrated on arrival. Override or supply them with
+        ``set_frame_interval`` / ``set_pixel_size``.
+
+        Examples::
+
+            Session.from_file("movie.nd2")                       # as recorded
+            Session.from_file("movie.nd2", start=100, end=1600)  # 1500 frames
+            Session.from_file("movie.nd2", temporal_step=2, spatial_step=2)
+            Session.from_file("movie.tif", spatial_window=(0, 512, 128, 640))
+            Session.from_file("two_channel.tif", channel=1)      # GCaMP channel
+
+            ImportParams(**kwargs)  # equivalently, built explicitly
+
+        The parameters used are kept on ``source.import_params`` and written to
+        ``provenance()``, so a run can be reproduced from its sidecar. Raises
+        ``ValueError`` on an unsupported file extension.
+        """
         return cls().load(path, **import_kwargs)
 
     def load(self, path, **import_kwargs) -> "Session":
         """Load a ``.tif``/``.tiff``/``.nd2`` stack, applying downsample-on-load.
 
         ``import_kwargs`` are ``ImportParams`` fields (``start``, ``end``,
-        ``temporal_step``, ``spatial_step``, ``spatial_window``, ``channel``).
+        ``temporal_step``, ``spatial_step``, ``spatial_window``, ``channel``);
+        see ``from_file`` for what each one does. Loading resets the time and
+        space axes to whatever the file declares.
         """
         params = ImportParams(**import_kwargs)
         self.data, self.source = io.load_stack(path, params)
-        self.timeline = Timeline(n_frames=len(self.data))
+        # Calibrate both axes from the file's metadata where available. The stack
+        # is downsampled, so a kept frame/pixel spans `*_step` native ones.
+        scale = self.source.scale
+        self.timeline = Timeline(
+            n_frames=len(self.data),
+            frame_interval=_downsampled_scale(scale.frame_interval, params.temporal_step),
+        )
+        self.space = SpatialScale(
+            pixel_size=_downsampled_scale(scale.pixel_size, params.spatial_step)
+        )
         return self
 
     def preview(self):
@@ -322,6 +394,21 @@ class Session:
         self.timeline.frame_interval = seconds_per_frame
         return self
 
+    def set_pixel_size(self, microns_per_pixel: Optional[float]) -> "Session":
+        """Calibrate the space axis (µm per pixel); ``None`` ⇒ pixels-only.
+
+        In *loaded* pixels, matching ROI coordinates: a stack imported with
+        ``spatial_step=2`` has pixels twice as wide as the file's. ``load`` already
+        sets this from file metadata when the recording declares it — call this to
+        supply or correct it.
+
+        Once set, propagation speed and the distance-vs-onset graph report µm
+        (µm/s when the frame interval is set too), as do the saved figures.
+        """
+        self._require_data()
+        self.space.pixel_size = microns_per_pixel
+        return self
+
     def compute_dff(self, method=BaselineMethod.FIRST_N, n=None, region=None) -> Traces:
         """Recompute ΔF/F on the current traces with an explicit baseline,
         overriding the default (extracting traces first if needed). ``traces.dff``
@@ -412,6 +499,13 @@ class Session:
             "source": None if src is None else {
                 "path": str(src.path),
                 "import_params": vars(src.import_params),
+                # The file's own µm/px and s/frame, before downsampling; the
+                # effective ones are under "scale" below.
+                "file_scale": vars(src.scale),
+            },
+            "scale": {
+                "frame_interval": None if self.timeline is None else self.timeline.frame_interval,
+                "pixel_size": self.space.pixel_size,
             },
             "registration": {
                 "mode": self.registration.mode.value,

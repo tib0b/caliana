@@ -49,6 +49,53 @@ s.export_traces("traces.csv")
 s.export_provenance("provenance.json")
 ```
 
+### Import parameters
+
+`from_file` (and `load`) take the `ImportParams` fields as keywords — the
+"downsample on load" controls, so a multi-GB recording never has to fit in RAM:
+
+| Keyword | Meaning |
+| --- | --- |
+| `start`, `end` | keep frames `[start, end)` (`end=None` ⇒ to the last frame) |
+| `temporal_step` | average every N frames into one (`1` = off) |
+| `spatial_step` | keep every Nth pixel along Y and X (`1` = full resolution) |
+| `spatial_window` | `(y0, y1, x0, x1)` crop of the field of view |
+| `channel` | which channel to keep from a multi-channel file |
+
+They apply in that order — `channel` → temporal crop → `temporal_step` →
+`spatial_window` → `spatial_step` — each acting on the result of the previous.
+The temporal crop comes first, so an nd2 only reads the frames you keep.
+`spatial_window` is in file pixels; everything afterwards (ROI centres, leaf
+boxes, crop windows) is in the loaded stack's coordinates. See
+`help(caliana.Session.from_file)` for the field-by-field guide, and
+`provenance()` for the parameters a run actually used.
+
+```python
+caliana.Session.from_file("movie.nd2", start=100, end=1600)     # a 1500-frame window
+caliana.Session.from_file("movie.nd2", temporal_step=2, spatial_step=2)
+caliana.Session.from_file("two_channel.tif", channel=1)
+```
+
+### Time and space scales
+
+Analyses always compute in frames and pixels; two optional scales convert the
+*reported* numbers. Both are read from the file's metadata at import when it
+declares them (nd2 acquisition settings, ImageJ/OME/resolution tags in TIFF) and
+adjusted for the downsampling, so they describe the stack you loaded:
+
+```python
+s = caliana.Session.from_file("movie.nd2", spatial_step=2)
+s.timeline.frame_interval    # seconds per frame, e.g. 1.0
+s.space.pixel_size           # µm per pixel, e.g. 162.8 (81.4 in the file, ×2)
+
+s.set_frame_interval(0.5)    # override / supply either one
+s.set_pixel_size(81.4)
+```
+
+Once set, traces read in seconds (plot axes, the CSV's `seconds` column), ROI
+distances in µm, propagation speed in µm/s — each axis degrading independently to
+frames/pixels when uncalibrated — and saved images carry a scale bar.
+
 Interactive (after `%gui qt` in a notebook): `s.preview()` (Stage I),
 `s.select_rois()` (Stage II), `s.analyze()` (Stage III). Each reads and writes the
 same `Session`, so widgets and API calls mix freely.
@@ -60,8 +107,9 @@ workflow end-to-end with rendered plots. [`examples/interactive.ipynb`](examples
 | Module (`src/caliana/`) | Responsibility (SPEC ref) |
 | --- | --- |
 | `models.py` | Core dataclasses/enums: `Session` state pieces (§2.1) |
-| `timeline.py` | Time axis (frames now; seconds later for electrodes) + events (§3, §6) |
-| `io.py` | Load TIFF/nd2 + downsample-on-load (§3 Stage I) |
+| `timeline.py` | Time axis (frames, optionally calibrated to seconds) + events (§3, §6) |
+| `space.py` | Space axis (pixels, optionally calibrated to µm) + unit helpers (§3) |
+| `io.py` | Load TIFF/nd2 + downsample-on-load + scale metadata (§3 Stage I) |
 | `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
 | `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
 | `analysis.py` | ΔF/F, response-onset timing, propagation, custom callables (§3 Stage III) |

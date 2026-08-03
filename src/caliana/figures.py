@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Optional
 
 import numpy as np
 
@@ -86,7 +85,7 @@ def paper_style(base_font_size: float = 8.0):
         yield
 
 
-def _finish(fig, save: Optional[str], dpi: int):
+def _finish(fig, save: str | None, dpi: int):
     if save is not None:
         # Vector formats (.pdf/.svg) ignore dpi for the vector parts; it only
         # affects any rasterized layers. Inferred from the extension.
@@ -147,9 +146,45 @@ def _overlay_legend(ax, overlays):
         text.set_color(ov.get("color", "white"))
 
 
+def _nice_bar_length(span_px: float, pixel_size: float) -> float:
+    """A round scale-bar length in µm spanning roughly a fifth of the image.
+
+    Rounded down to the nearest 1/2/5×10ⁿ so the bar reads as "100 µm", not
+    "137 µm" — the convention in print, and the reason a bar beats tick labels.
+    """
+    target = span_px * pixel_size / 5.0
+    if not np.isfinite(target) or target <= 0:
+        return 0.0          # nothing sensible to draw; the caller skips the bar
+    decade = 10.0 ** np.floor(np.log10(target))
+    return next((m * decade for m in (5.0, 2.0, 1.0) if m * decade <= target), 0.0)
+
+
+def _draw_scale_bar(ax, image, pixel_size: float, color: str = "white"):
+    """Draw a labelled scale bar in the bottom-right of an image axis.
+
+    Images are rendered without ticks, so this is how a calibrated figure carries
+    its spatial scale. Sized and placed in pixel (data) coordinates, so it stays
+    correct whatever the figure size.
+    """
+    height, width = image.shape[:2]
+    length_um = _nice_bar_length(width, pixel_size)
+    if not length_um:
+        return
+    length_px = length_um / pixel_size
+    # Whole-plant fields run to centimetres; "5 mm" beats "5000 µm" on a figure.
+    text = f"{length_um / 1000:g} mm" if length_um >= 1000 else f"{length_um:g} µm"
+    pad = 0.04 * width
+    x1 = width - pad
+    y = height - 0.06 * height
+    ax.plot([x1 - length_px, x1], [y, y], color=color, lw=2.0, solid_capstyle="butt",
+            clip_on=False)
+    ax.text(x1 - length_px / 2.0, y - 0.02 * height, text,
+            color=color, ha="center", va="bottom", fontsize="small")
+
+
 def export_image(image, *, levels=None, cmap="gray", cbar_label=None,
-                 overlays=None, title=None, width=COL_SINGLE, height=None,
-                 save=None, dpi=600):
+                 overlays=None, title=None, pixel_size=None, width=COL_SINGLE,
+                 height=None, save=None, dpi=600):
     """Clean render of a 2D image the way a pyqtgraph ImageView shows it.
 
     levels: ``(vmin, vmax)`` contrast pair (e.g. the view's current histogram
@@ -158,6 +193,8 @@ def export_image(image, *, levels=None, cmap="gray", cbar_label=None,
     overlays: ROI/leaf shape specs drawn on top (see ``_draw_overlay``); their
         labels go in a legend above the axes. NaN pixels render transparent, as
         in the live view.
+    pixel_size: µm per pixel (``Session.space.pixel_size``); draws a scale bar
+        when set. ``None`` (uncalibrated) leaves the image bare, as before.
     """
     import matplotlib.pyplot as plt
 
@@ -169,6 +206,8 @@ def export_image(image, *, levels=None, cmap="gray", cbar_label=None,
         im = ax.imshow(image, cmap=cmap, origin="upper", vmin=lo, vmax=hi)
         for ov in overlays or []:
             _draw_overlay(ax, ov)
+        if pixel_size:
+            _draw_scale_bar(ax, image, pixel_size)
         if cbar_label is not None:
             cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cb.set_label(cbar_label)

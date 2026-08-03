@@ -16,6 +16,16 @@ def frame_interval(session) -> float | None:
     return tl.frame_interval if (tl is not None and tl.frame_interval) else None
 
 
+def pixel_size(session) -> float | None:
+    """The session's µm-per-pixel, or None when distances are pixels-only.
+
+    The spatial counterpart of ``frame_interval``: collapses "no SpatialScale"
+    and "uncalibrated" into the single ``None`` the widgets branch on.
+    """
+    space = getattr(session, "space", None)
+    return space.pixel_size if (space is not None and space.pixel_size) else None
+
+
 def dff0(raw) -> np.ndarray:
     """Display-only normalization of ``[n_roi, T]`` raw F to (F − F[0]) / F[0].
 

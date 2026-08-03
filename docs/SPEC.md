@@ -89,10 +89,22 @@ wrapper or the app shell.
 **Behavior**
 - Read the selected/cropped/downsampled data into a numpy array `[T, Y, X]`,
   stored in `Session.data`.
-- **Units:** size is always in pixel, indices are in seconds if a time scale is specified, and falls
-  back to frames otherwise.
-  (µm/pixel, seconds) is required or used. Propagation is reported in px/frame,
-  timing in frames.
+- **Units:** pixels and frames are the internal model — ROI geometry, onset
+  detection and propagation are always computed in them, so results never depend
+  on whether a calibration was set. Two optional scales convert them *for
+  reporting*: a **time scale** (`Timeline.frame_interval`, seconds per frame) and
+  a **space scale** (`SpatialScale.pixel_size`, µm per pixel). Each is independent
+  and each falls back to its native unit, so a readout is in seconds if the time
+  scale is set, µm if the space scale is, and propagation speed reads µm/s,
+  µm/frame, px/s or px/frame accordingly.
+- **Scale metadata:** both scales are read from the file at import when it
+  declares them — nd2 acquisition settings (`voxel_size`, time-loop period),
+  ImageJ TIFF (`unit` + resolution tag, `finterval`/`fps`), OME-XML
+  (`PhysicalSizeX`, `TimeIncrement`), or the baseline TIFF resolution tags — and
+  scaled by the temporal/spatial step so they describe the *loaded* stack. Files
+  that declare nothing stay in frames/pixels; `Session.set_frame_interval` /
+  `set_pixel_size` override either at any time. Reading is best-effort: no
+  guessing at units, and a metadata failure never fails the load.
 
 **Visualization (Stage I widget)**
 - **Frame scrubbing + playback:** time slider plus a play button to watch the
@@ -244,11 +256,15 @@ Analyses operate on the ROI traces (and may reference `Session.data`).
 
 ## 6. Open questions / future work
 
-- Irregular frame timing (nd2 per-frame timestamps) is ignored under the
-  pixels/frames model; revisit if physical-time analyses are needed later.
+- Irregular frame timing is still ignored: the frame interval read from an nd2 is
+  the time loop's *nominal* period, not its per-frame timestamps, so the time axis
+  is uniform. Fine while jitter stays sub-millisecond (as in the sample
+  recordings); revisit if a dataset drifts or drops frames.
   (nd2 reading is implemented and lazy/dask-backed; Z and multipoint dims are
   currently reduced to their first index — revisit if Z-projection or
   multi-position handling is needed.)
+- Pixel size is taken as isotropic (the X voxel size / XResolution). Anisotropic
+  pixels would need a per-axis scale and distance metric throughout.
 - Registration quality on low-contrast tissue — may need a quality indicator or
   manual reference-frame selection.
 - **Registration vs. the signal itself.** Intensity-based rigid registration
@@ -276,13 +292,14 @@ kept in mind so the design doesn't preclude it:
   grow an `aux_signals` slot (named 1-D traces sampled over the recording)
   living next to `traces`, plotted on the same timeline and exportable to the
   same CSV. ROI traces and electrode traces would share one time axis.
-- **Real-time axis tension.** We chose **pixels/frames only**. Electrodes sample
-  in real time (Hz) at a rate unrelated to the frame rate, so correlating the
-  two will eventually require a real (seconds) time axis and a
-  frame↔time mapping. This reinforces keeping the time-axis representation
-  isolated (frame index now, but not hard-coded everywhere) so a seconds axis
-  can be added without rewriting analyses. Ties into the irregular-frame-timing
-  item above.
+- **Real-time axis tension.** Computation stays in **pixels/frames**, with the
+  optional scales converting for reporting (§3 Stage I, Units). Electrodes sample
+  in real time (Hz) at a rate unrelated to the frame rate, so correlating the two
+  needs the frame↔time mapping the Timeline now provides — what remains is
+  resampling the two streams onto it. Keeping the axis representation isolated
+  (`Timeline`/`SpatialScale`, not hard-coded units in the analyses) is what made
+  the seconds axis cheap to add, and the same holds for what's left. Ties into
+  the irregular-frame-timing item above.
 - **Events as the alignment anchor.** The optional stimulus/event markers are
   the natural synchronization point between imaging and electrode streams; keep
   events first-class and timeline-based.

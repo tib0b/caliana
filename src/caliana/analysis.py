@@ -267,6 +267,11 @@ def cross_roi_propagation(
     ``source_roi``, ``speed_px_per_frame``, a ``direction`` unit vector ``(dy, dx)``
     toward later onset, the ``direction_mode`` used, and ``pairwise`` speeds.
 
+    Results stay in the native pixels/frames regardless of any calibration, so
+    they never depend on when the scales were set; convert for reporting with
+    ``space.speed_units(session.space.pixel_size, session.timeline.frame_interval)``
+    (what the analysis widget's readouts do).
+
     direction_mode: how the propagation direction is decided.
       - ``"roi_line"`` (default): constrain it to the line the ROIs lie on (their
         principal axis, ``roi_line_axis``) and fit onset against position along
