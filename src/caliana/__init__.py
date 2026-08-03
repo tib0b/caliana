@@ -14,13 +14,13 @@ Quick start (headless):
 from __future__ import annotations
 
 from .models import (
+    ROI,
     BaselineMethod,
     FileScale,
     ImportParams,
     LeafRegion,
     RegistrationMode,
     RigidTransform,
-    ROI,
     ROIShape,
     Traces,
 )
@@ -28,21 +28,21 @@ from .session import Session
 from .space import SpatialScale
 from .timeline import Event, Timeline
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
-    "Session",
-    "ImportParams",
-    "FileScale",
     "ROI",
-    "ROIShape",
+    "BaselineMethod",
+    "Event",
+    "FileScale",
+    "ImportParams",
     "LeafRegion",
+    "ROIShape",
     "RegistrationMode",
     "RigidTransform",
-    "Traces",
-    "BaselineMethod",
-    "Timeline",
-    "Event",
+    "Session",
     "SpatialScale",
+    "Timeline",
+    "Traces",
     "__version__",
 ]
