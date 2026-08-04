@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 
+from .. import figures
 from ._qt import get_qt
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -72,7 +73,10 @@ class LeafSelectionWidget(QtWidgets.QWidget):
             return
         stack = np.asarray(self.session._working_stack())
         self._shape_yx = stack.shape[1:]
-        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2})
+        # Same first-frame [min, 99th pct] contrast as the import preview, so a
+        # leaf looks identical whichever tab you're on.
+        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
+                            autoLevels=False, levels=figures.intensity_levels(stack))
         # Re-draw any leaf boxes already on the session.
         for i, leaf in enumerate(list(self.session.leaf_regions)):
             self._add_leaf_graphic(i, leaf)

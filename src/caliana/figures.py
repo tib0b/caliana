@@ -40,10 +40,19 @@ def intensity_levels(image, pmax: float = 99.0):
     ``pmax``-th percentile keeps a handful of outlier-bright pixels from
     flattening the contrast across the rest of the image. Falls back to the full
     range for near-flat images where that top percentile equals the minimum. This
-    is the same scale the interactive preview/ROI widgets default to, shared here
-    so a saved figure matches what was on screen.
+    is the same scale the interactive preview/ROI/leaf widgets default to, shared
+    here so a saved figure matches what was on screen.
+
+    A 3D input is read as a ``(t, y, x)`` stack and scaled from its **first frame
+    only**: the illumination doesn't drift appreciably over a recording, so the
+    first frame is a fair stand-in for all of them, and one frame's percentile is
+    far cheaper than the whole stack's. It also keeps the range independent of
+    what happens later in the recording — a bright transient mid-stack no longer
+    darkens the frames before it.
     """
     image = np.asarray(image)
+    if image.ndim == 3:
+        image = image[0]
     lo = float(np.min(image))
     hi = float(np.percentile(image, pmax))
     if hi <= lo:

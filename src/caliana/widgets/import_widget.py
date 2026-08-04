@@ -105,9 +105,10 @@ class ImportPreviewWidget(QtWidgets.QWidget):
             return
         stack = np.asarray(self.session._working_stack())
         # axes maps stack dims -> ImageView roles (row-major: 1=y, 2=x). Contrast
-        # defaults to figures.intensity_levels' [min, 99th pct] — the same range
-        # the saved figure uses, so the export matches the preview — while the
-        # histogram still spans the full data range and can be dragged wider.
+        # defaults to figures.intensity_levels' [min, 99th pct] of the first frame
+        # — the same range the saved figure uses, so the export matches the
+        # preview — while the histogram still spans the full data range and can be
+        # dragged wider.
         self.movie.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
                             autoLevels=False, levels=figures.intensity_levels(stack))
         self.movie.sigTimeChanged.connect(self._on_time_changed)

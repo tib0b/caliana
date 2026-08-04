@@ -686,7 +686,45 @@ def test_analysis_widget_derivative_onset():
     print("analysis widget derivative onset OK")
 
 
+def test_stack_contrast_scales_on_first_frame():
+    """A stack's display range comes from frame 0 alone, in every image view.
+
+    A bright transient mid-recording must not darken the frames before it, and
+    the preview / ROI / leaf views must all agree on the range.
+    """
+    from caliana import figures
+
+    stack = np.full((8, 16, 12), 100.0, dtype=np.float32)
+    stack[4] += 5000.0                              # transient, frame 4 only
+    expected = figures.intensity_levels(stack[0])
+    assert figures.intensity_levels(stack) == expected
+
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget half")
+        return
+    ensure_app()
+    s = caliana.Session()
+    s.data = stack
+    s.timeline = caliana.Timeline(n_frames=8)
+
+    for cls in (ImportPreviewWidget, RoiSelectionWidget, LeafSelectionWidget):
+        w = cls(s)
+        view = w.movie if cls is ImportPreviewWidget else w.image
+        assert np.allclose(view.getLevels(), expected), cls.__name__
+        w.close()
+
+    # Toggling tracking keeps whatever contrast is on screen (raw and stabilized
+    # views are the same tissue), including a manual histogram drag.
+    w = RoiSelectionWidget(s)
+    w.image.setLevels(3.0, 77.0)
+    w.track_box.setChecked(True)
+    assert np.allclose(w.image.getLevels(), (3.0, 77.0))
+    w.close()
+    print("first-frame stack contrast OK")
+
+
 if __name__ == "__main__":
+    test_stack_contrast_scales_on_first_frame()
     test_import_preview_widget()
     test_roi_selection_widget()
     test_leaf_selection_widget()

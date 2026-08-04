@@ -151,7 +151,11 @@ class RoiSelectionWidget(QtWidgets.QWidget):
             return
         stack = np.asarray(self.session._working_stack())
         self._shape_yx = stack.shape[1:]
-        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2})
+        # Same first-frame [min, 99th pct] contrast as the import preview, so the
+        # tissue looks identical whichever tab you're on — and so the ROI overlay
+        # export (which reads getLevels) starts from that range.
+        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
+                            autoLevels=False, levels=figures.intensity_levels(stack))
         # Re-draw any ROIs/leaf boxes already on the session.
         for roi in list(self.session.rois):
             self._add_roi_graphic(roi)
@@ -413,7 +417,12 @@ class RoiSelectionWidget(QtWidgets.QWidget):
             self.hint.setText("Click the image to place an ROI")
             stack = np.asarray(self.session._working_stack())
         frame = self.image.currentIndex                       # preserve the slider
-        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2})
+        # Raw and stabilized views are the same tissue at the same exposure, so
+        # carry the on-screen contrast across the swap rather than rescaling —
+        # a manual histogram drag survives toggling tracking on and off.
+        levels = self.image.getLevels()
+        self.image.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
+                            autoLevels=False, levels=levels)
         self.image.setCurrentIndex(frame)
         self._sync_roi_positions(frame)
 
