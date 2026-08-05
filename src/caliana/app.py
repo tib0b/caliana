@@ -185,8 +185,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._revision = revision
         has_data = self.session.data is not None
         has_rois = has_data and bool(self.session.rois)
+        # Analysis needs only a stack: its heatmap and kymograph pages are
+        # dataset-wide, and the one page that does need ROIs gates itself.
         for index, enabled in ((1, has_data), (2, has_data),
-                               (3, has_rois), (4, has_rois)):
+                               (3, has_rois), (4, has_data)):
             self.tabs.setTabEnabled(index, enabled)
             self.tabs.setTabToolTip(index, _TAB_HINT[index] if enabled
                                     else _PREREQUISITE[index])
@@ -384,7 +386,7 @@ _PREREQUISITE = {
     1: "Load a recording first (Import tab)",
     2: "Load a recording first (Import tab)",
     3: "Place at least one ROI first (ROIs tab)",
-    4: "Place at least one ROI first (ROIs tab)",
+    4: "Load a recording first (Import tab)",
 }
 
 # What a tab is for, once it is reachable.
@@ -392,7 +394,7 @@ _TAB_HINT = {
     1: "Optional — stabilize leaf motion before placing ROIs",
     2: "Click the image to place ROIs; traces preview live",
     3: "Optional — restrict every trace to one time window",
-    4: "ΔF/F, smoothing, propagation, onset heatmaps and kymographs",
+    4: "Onset heatmaps and kymographs; ΔF/F, smoothing and propagation once ROIs exist",
 }
 
 

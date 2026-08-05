@@ -216,6 +216,11 @@ def onset_time_map(
     # First frame at/after the baseline window whose value reaches threshold.
     start = baseline_region[1] if baseline_region is not None else 0
     above = sig[start:] >= thresh[None, :]
+    if above.shape[0] == 0:
+        # The baseline window covers the whole recording, leaving nothing to
+        # search: no pixel has an onset. Matches scalar onset_time, which returns
+        # NaN for the same window rather than raising.
+        return np.full((Yb, Xb), np.nan)
     crossed = above.any(axis=0)
     j = start + np.argmax(above, axis=0)                # argmax=0 where never crossed
 

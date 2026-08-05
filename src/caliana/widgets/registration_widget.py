@@ -32,7 +32,7 @@ _MODES = {
 # pystackreg models, coarsest first (see registration._STACKREG_TRANSFORMS).
 _TRANSFORMS = ["translation", "rigid_body", "scaled_rotation", "affine"]
 
-_REFERENCES = ["mean", "first", "previous"]
+_REFERENCES = ["previous", "first", "mean"]
 
 
 class RegistrationWidget(QtWidgets.QWidget):
@@ -95,9 +95,9 @@ class RegistrationWidget(QtWidgets.QWidget):
         self.mask_check.setToolTip(
             "Estimate motion on the tissue silhouette instead of raw intensities, "
             "so registration tracks the dim leaf rather than the static bright "
-            "background (recommended for these recordings)"
+            "background -- curently unsuported"
         )
-        self.mask_check.setChecked(True)
+        self.mask_check.setChecked(False)
         row.addWidget(self.mask_check)
         row.addStretch(1)
         layout.addLayout(row)

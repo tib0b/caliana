@@ -2,8 +2,9 @@
 
 Analysis of plant calcium imaging data — load a recording, stabilize leaf
 movement, place ROIs, extract fluorescence traces, compute ΔF/F, and run
-response/propagation analyses with reproducible export. Usable as a headless
-library, from a Jupyter notebook, or via embeddable PyQt widgets.
+response/propagation analyses with reproducible export. Usable as a standalone
+app, from a Jupyter notebook, or as a headless library — all three over the same
+reusable PyQt widgets and the same `Session` object.
 
 See [`docs/SPEC.md`](docs/SPEC.md) for the full specification.
 
@@ -34,91 +35,84 @@ pip install -e '.[dev]'     # + pytest
 
 ## Quickstart
 
-```python
-import caliana
+Two ways in, over the same `Session`: the app if you'd rather not write Python,
+the notebook if you want the steps under your own control.
 
-s = caliana.Session.from_file("movie.tif", temporal_step=2)   # load + downsample
-s.register(caliana.RegistrationMode.WHOLE_FRAME, reference="mean")
-s.add_roi(center=(32, 32), size=4, label="centre")
-s.extract_traces()
-s.compute_dff(n=12)
-res = s.cross_roi_propagation(signal="dff")     # speed, direction, source ROI
-# direction_mode="roi_line" (default) fits the speed along the line the ROIs sit
-# on; "auto" fits a free 2D direction, which needs ROIs spread in two dimensions.
-kymo = s.kymograph([(10, 5), (30, 40)], baseline=(0, 12))   # distance × time image
-s.export_traces("traces.csv")
-s.export_provenance("provenance.json")
-```
-
-### Import parameters
-
-`from_file` (and `load`) take the `ImportParams` fields as keywords — the
-"downsample on load" controls, so a multi-GB recording never has to fit in RAM:
-
-| Keyword | Meaning |
-| --- | --- |
-| `start`, `end` | keep frames `[start, end)` (`end=None` ⇒ to the last frame) |
-| `temporal_step` | average every N frames into one (`1` = off) |
-| `spatial_step` | keep every Nth pixel along Y and X (`1` = full resolution) |
-| `spatial_window` | `(y0, y1, x0, x1)` crop of the field of view |
-| `channel` | which channel to keep from a multi-channel file |
-
-They apply in that order — `channel` → temporal crop → `temporal_step` →
-`spatial_window` → `spatial_step` — each acting on the result of the previous.
-The temporal crop comes first, so an nd2 only reads the frames you keep.
-`spatial_window` is in file pixels; everything afterwards (ROI centres, leaf
-boxes, crop windows) is in the loaded stack's coordinates. See
-`help(caliana.Session.from_file)` for the field-by-field guide, and
-`provenance()` for the parameters a run actually used.
-
-```python
-caliana.Session.from_file("movie.nd2", start=100, end=1600)     # a 1500-frame window
-caliana.Session.from_file("movie.nd2", temporal_step=2, spatial_step=2)
-caliana.Session.from_file("two_channel.tif", channel=1)
-```
-
-### Time and space scales
-
-Analyses always compute in frames and pixels; two optional scales convert the
-*reported* numbers. Both are read from the file's metadata at import when it
-declares them (nd2 acquisition settings, ImageJ/OME/resolution tags in TIFF) and
-adjusted for the downsampling, so they describe the stack you loaded:
-
-```python
-s = caliana.Session.from_file("movie.nd2", spatial_step=2)
-s.timeline.frame_interval    # seconds per frame, e.g. 1.0
-s.space.pixel_size           # µm per pixel, e.g. 162.8 (81.4 in the file, ×2)
-
-s.set_frame_interval(0.5)    # override / supply either one
-s.set_pixel_size(81.4)
-```
-
-Once set, traces read in seconds (plot axes, the CSV's `seconds` column), ROI
-distances in µm, propagation speed in µm/s — each axis degrading independently to
-frames/pixels when uncalibrated — and saved images carry a scale bar.
-
-Interactive (after `%gui qt` in a notebook): `caliana.open_session()` to pick a
-file and its import parameters in a window, then `s.preview()` (Stage I),
-`s.select_rois()` (Stage II), `s.analyze()` (Stage III). Each reads and writes the
-same `Session`, so widgets and API calls mix freely.
-[`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks the full headless
-workflow end-to-end with rendered plots. [`examples/interactive.ipynb`](examples/interactive.ipynb) shows an example workflow using the interactive PyQt widgets.
-
-## Standalone app
-
-The same widgets, wrapped in one window with the workflow as tabs — no Python
-required to run an analysis:
+### The app
 
 ```bash
 caliana                 # or: caliana path/to/movie.nd2
 ```
 
-Each tab stays closed until its prerequisite exists (no ROIs before a stack, no
-analysis before ROIs), the status bar carries the run — source, `[T,Y,X]`,
-calibration, registration mode, ROI count, crop — and `File ▸ Export` writes the
-traces CSV, the stack TIFF and the provenance JSON, together or one at a time.
-Long steps (loading, registration, export) run off the UI thread behind a
-progress dialog, and failures are reported in a dialog rather than a traceback.
+One window with the workflow as tabs — import → registration → ROIs → crop →
+analysis — and export from the `File` menu. Nothing else to set up; see
+[Standalone app](#standalone-app) below for what each tab expects.
+
+### A notebook
+
+Each wrapper opens one window, blocks the cell until you close it, and leaves its
+result on the `Session` (after `%gui qt`):
+
+```python
+%gui qt
+import caliana
+
+s = caliana.open_session()   # pick the file + import parameters in a window
+s.preview()                  # scrub the movie, check the max projection
+s.select_rois()              # click ROIs; their traces preview live
+s.analyze()                  # ΔF/F, smoothing, propagation, heatmaps, kymographs
+s.export_traces("traces.csv")
+```
+
+`s.select_leaves()` and `s.crop_traces()` cover the two optional steps (per-leaf
+boxes, restricting every trace to one time window).
+
+Because it is all one `Session`, widget steps and plain calls mix freely — do the
+ROIs by hand and the rest in code, or skip the windows entirely:
+
+```python
+s = caliana.Session.from_file("movie.nd2", temporal_step=2, spatial_step=2)
+s.register(caliana.RegistrationMode.WHOLE_FRAME)
+s.add_roi(center=(32, 32), size=4, label="centre")
+s.compute_dff(n=12)
+s.cross_roi_propagation(signal="dff")                 # speed, direction, source ROI
+s.kymograph([(10, 5), (30, 40)], baseline=(0, 12))    # distance × time image
+s.export_provenance("provenance.json")
+```
+
+Two things the API does quietly:
+
+- **Import parameters.** `from_file`/`load` take `start`/`end`, `temporal_step`,
+  `spatial_step`, `spatial_window` and `channel`, applied in that order, so a
+  multi-GB recording never has to fit in RAM — and so an nd2 only reads the
+  frames you keep. `spatial_window` is in file pixels; everything afterwards (ROI
+  centres, leaf boxes, crop windows) is in the loaded stack's coordinates.
+  `help(caliana.Session.from_file)` takes them field by field, and `provenance()`
+  records what a run actually used.
+- **Time and space scales.** Analyses always compute in frames and pixels;
+  `timeline.frame_interval` and `space.pixel_size` convert the *reported* numbers
+  to seconds, µm and µm/s. Both are read from the file's metadata when it
+  declares one (and rescaled for the downsampling), or set them yourself with
+  `set_frame_interval` / `set_pixel_size`. Each axis degrades independently to
+  frames/pixels when uncalibrated.
+
+[`examples/interactive.ipynb`](examples/interactive.ipynb) walks the widget
+workflow; [`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks the
+headless one end-to-end with rendered plots.
+
+## Standalone app
+
+The same widgets the notebook drives, wrapped in one window — no Python required
+to run an analysis.
+
+Each tab stays closed until its prerequisite exists: no ROIs before a stack, no
+cropping before ROIs. Analysis opens on the stack alone, since its onset-heatmap
+and kymograph pages are dataset-wide — only its trace page waits for ROIs. The
+status bar carries the run — source, `[T,Y,X]`, calibration, registration mode,
+ROI count, crop — and `File ▸ Export` writes the traces CSV, the stack TIFF and
+the provenance JSON, together or one at a time. Long steps (loading,
+registration, export) run off the UI thread behind a progress dialog, and
+failures are reported in a dialog rather than a traceback.
 
 The session is shared by every tab: registering on tab 2 invalidates the traces
 tab 5 draws, and each panel re-reads the session when it is next opened.

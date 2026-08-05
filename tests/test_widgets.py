@@ -504,8 +504,8 @@ def test_analysis_widget_onset_heatmap():
 
 
 def test_analysis_widget_kymograph():
-    """The Kymograph page: click out a path, commit it as an editable polyline, and
-    read the intensity along it over time as a distance × time image."""
+    """The Kymograph page: click out a path — no mode to enter — and read the
+    intensity along it over time as a distance × time image."""
     if not HAVE_GUI:
         print("GUI stack not available; skipping widget test")
         return
@@ -527,19 +527,17 @@ def test_analysis_widget_kymograph():
 
     # Nothing drawn yet: computing says what to do rather than raising.
     assert w.compute_kymograph() is None
-    assert "Draw a path" in w.status.text()
+    assert "at least two points" in w.status.text()
 
-    # Draw a path along the row, then finish it: the clicks become one editable,
-    # draggable polyline, and the points read back from the graphic.
-    w.path_btn.setChecked(True)
-    for col in (2, 10, 17):
+    # Points go straight onto the path. One is only a marker; from two on it is a
+    # polyline whose handles are individually draggable.
+    w.add_path_point(6, 2)
+    assert w.path_points() == [(6.0, 2.0)]
+    assert not isinstance(w._path_item, pg.PolyLineROI)
+    for col in (10, 17):
         w.add_path_point(6, col)
-    assert w._path_preview is not None
-    w.finish_path()
-    assert not w.path_btn.isChecked() and w._path_preview is None
     assert isinstance(w._path_item, pg.PolyLineROI)
-    points = w.path_points()
-    assert [(round(y), round(x)) for y, x in points] == [(6, 2), (6, 10), (6, 17)]
+    assert [(round(y), round(x)) for y, x in w.path_points()] == [(6, 2), (6, 10), (6, 17)]
 
     # ΔF/F is the default; the kymograph is one row per pixel along the path.
     assert w.kymo_signal_box.currentText() == "ΔF/F"
@@ -575,25 +573,102 @@ def test_analysis_widget_kymograph():
     rect = w.kymo_image.mapRectToView(w.kymo_image.boundingRect())
     assert (rect.width(), rect.height()) == (T * 0.5, 15.0 * 2.0)
 
-    # Clearing drops the path; the next compute asks for a new one.
+    # ‘Clear last point’ walks the path back a point at a time, graphic included:
+    # three points, then two (still a polyline), then one (a bare marker).
+    w.clear_last_point()
+    assert [(round(y), round(x)) for y, x in w.path_points()] == [(6, 2), (6, 10)]
+    assert isinstance(w._path_item, pg.PolyLineROI)
+    w.clear_last_point()
+    assert len(w.path_points()) == 1 and not isinstance(w._path_item, pg.PolyLineROI)
+
+    # ‘Clear path’ drops the rest; the next compute asks for a new one.
     w.clear_path()
     assert w._path_item is None and w.path_points() == []
     assert w.compute_kymograph() is None
+    w.clear_last_point()                             # nothing to undo, no error
+    assert "No path" in w.status.text()
 
-    # Clicks only reach the path while ‘Draw path’ is down — otherwise the image
-    # is just an image (and the clear button's checked flag doesn't jam the mode).
-    w._on_kymo_click(_Click(QtCore.QPointF(5.0, 5.0)))
-    assert w.path_points() == [] and not w.path_btn.isChecked()
-
-    # Drawing, a double-click finishes the path where it stands.
-    w.path_btn.setChecked(True)
+    # The second click of a double-click is dropped, so it can't stack a
+    # duplicate point on the first one's.
     w.add_path_point(6, 2)
-    w.add_path_point(6, 17)
     w._on_kymo_click(_Click(QtCore.QPointF(5.0, 5.0), double=True))
-    assert not w.path_btn.isChecked() and isinstance(w._path_item, pg.PolyLineROI)
+    assert len(w.path_points()) == 1
 
     w.close()
     print("analysis widget kymograph OK")
+
+
+def test_analysis_widget_kymograph_points_are_movable():
+    """Each point of the path is draggable, and the kymograph follows it — the
+    graphic is the path, not a picture of where it was clicked."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+
+    # Rows differ so a dragged point lands on visibly different pixels.
+    T, Y, X = 12, 16, 20
+    stack = np.zeros((T, Y, X), dtype=np.float32)
+    for y in range(Y):
+        stack[:, y, :] = 10.0 * (y + 1)
+    s = caliana.Session()
+    s.data = stack
+    s.timeline = caliana.Timeline(n_frames=T)
+
+    w = AnalysisWidget(s)
+    w.kymo_signal_box.setCurrentText("raw intensity")
+    w.add_path_point(4, 2)
+    w.add_path_point(4, 17)
+    before = w.compute_kymograph()["values"]
+    assert np.allclose(before, 50.0)                 # row 4 -> 10 * 5
+
+    # Drag the whole polyline down 6 rows: the points, and so the kymograph,
+    # follow it onto row 10 without anything being re-clicked.
+    w._path_item.setPos(0, 6)
+    assert [round(y) for y, _x in w.path_points()] == [10, 10]
+    after = w.compute_kymograph()["values"]
+    assert np.allclose(after, 110.0)                 # row 10 -> 10 * 11
+
+    # Moving one handle moves only its end of the path.
+    handles = w._path_item.getHandles()
+    w._path_item.movePoint(handles[0], pg.Point(2.0, 0.0))
+    moved = w.path_points()
+    assert round(moved[0][0]) == 0 and round(moved[1][0]) == 10
+
+    w.close()
+    print("analysis widget kymograph movable points OK")
+
+
+def test_analysis_widget_trace_page_gates_itself_on_rois():
+    """The Analysis tab opens on a stack alone (heatmaps and kymographs need no
+    ROIs); only the trace page is closed until ROIs exist."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = caliana.Session()
+    s.data = (np.random.default_rng(8).random((10, 24, 20)) * 255).astype(np.uint16)
+    s.timeline = caliana.Timeline(n_frames=10)
+
+    w = AnalysisWidget(s)
+    assert not w.tabs.isTabEnabled(0)                       # Trace analysis
+    assert w.tabs.isTabEnabled(1) and w.tabs.isTabEnabled(2)
+    assert "ROI" in w.tabs.tabToolTip(0)
+    assert "No ROIs yet" in w.status.text()
+
+    # Both dataset-wide pages run with no ROIs at all.
+    assert w.compute_onset_heatmap() is not None
+    w.add_path_point(4, 4)
+    w.add_path_point(18, 16)
+    assert w.compute_kymograph() is not None
+
+    # Placing an ROI opens the trace page on the next reload.
+    s.add_roi(center=(12, 10), size=3)
+    w.reload()
+    assert w.tabs.isTabEnabled(0) and w.status.text() == ""
+
+    w.close()
+    print("analysis widget trace-page gating OK")
 
 
 def test_analysis_widget_kymograph_path_is_dropped_on_reload():
@@ -607,10 +682,8 @@ def test_analysis_widget_kymograph_path_is_dropped_on_reload():
     s.add_roi(center=(16, 12), size=4)
     w = AnalysisWidget(s)
 
-    w.path_btn.setChecked(True)
     w.add_path_point(4, 4)
     w.add_path_point(20, 18)
-    w.finish_path()
     assert w.compute_kymograph() is not None
 
     w.reload()
@@ -618,11 +691,10 @@ def test_analysis_widget_kymograph_path_is_dropped_on_reload():
     assert w._kymo_result is None
     assert w._kymo_shape_yx == s.data.shape[1:]
 
-    # A half-drawn path doesn't survive either, and doesn't commit on the way out.
-    w.path_btn.setChecked(True)
+    # A one-point path (no polyline yet) is dropped just the same.
     w.add_path_point(3, 3)
     w.reload()
-    assert w._path_item is None and not w.path_btn.isChecked()
+    assert w._path_item is None and w.path_points() == []
 
     w.close()
     print("analysis widget kymograph reload OK")
@@ -1163,6 +1235,8 @@ if __name__ == "__main__":
     test_analysis_widget_analysis_selection()
     test_analysis_widget_onset_heatmap()
     test_analysis_widget_kymograph()
+    test_analysis_widget_kymograph_points_are_movable()
+    test_analysis_widget_trace_page_gates_itself_on_rois()
     test_analysis_widget_kymograph_path_is_dropped_on_reload()
     test_analysis_widget_propagation_uses_displayed_signal()
     test_analysis_widget_propagation_direction_mode()

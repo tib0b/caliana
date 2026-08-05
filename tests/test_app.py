@@ -70,10 +70,11 @@ def test_app_walks_the_workflow():
     assert task.wait() and task.error is None
     assert window.session.data.shape == (100, 64, 64)
     assert window.tabs.currentIndex() == 0
-    # A stack exists: registration and ROI placement open up, the rest waits for
-    # an ROI.
+    # A stack exists: registration, ROI placement and analysis open up (the
+    # heatmap and kymograph pages are dataset-wide); only cropping the traces
+    # still waits for an ROI.
     assert [window.tabs.isTabEnabled(i) for i in range(5)] == \
-        [True, True, True, False, False]
+        [True, True, True, False, True]
     assert DATA.name in window._status_label.text()
     assert str(DATA) in window._recent_files()
 
@@ -87,8 +88,8 @@ def test_app_walks_the_workflow():
     assert window.session.track_motion
     assert "registration: whole-frame" in window._status_label.text()
 
-    # 3 · ROIs — placed here, they gate the two tabs after this one. The
-    # track-motion toggle is live because registration (tab 2) produced
+    # 3 · ROIs — placed here, they open the crop tab and the analysis tab's trace
+    # page. The track-motion toggle is live because registration (tab 2) produced
     # transforms: the change propagated across panels.
     window.tabs.setCurrentIndex(2)
     assert window.roi_panel.track_box.isEnabled()
@@ -149,15 +150,22 @@ def test_app_gates_on_prerequisites():
     window.tabs.setCurrentIndex(2)
     window.roi_panel.add_roi_at(32, 32)
     window._refresh_chrome()
-    assert window.tabs.isTabEnabled(4)
+    assert window.tabs.isTabEnabled(3)
 
-    window.tabs.setCurrentIndex(4)
+    window.tabs.setCurrentIndex(3)
     window.roi_panel.delete_last_roi()          # the last ROI goes
     window._refresh_chrome()
-    assert not window.tabs.isTabEnabled(4)
+    assert not window.tabs.isTabEnabled(3)
     # Never left on a dead tab, and the closed one says what would open it.
     assert window.tabs.isTabEnabled(window.tabs.currentIndex())
-    assert "ROI" in window.tabs.tabToolTip(4)
+    assert "ROI" in window.tabs.tabToolTip(3)
+
+    # Analysis needs only the stack, so it stays open; the ROI prerequisite moves
+    # inside it, onto the one page that has one.
+    assert window.tabs.isTabEnabled(4)
+    window.tabs.setCurrentIndex(4)
+    assert not window.analysis_panel.tabs.isTabEnabled(0)      # Trace analysis
+    assert window.analysis_panel.tabs.isTabEnabled(2)          # Kymograph
 
     window.close()
     print("app gating OK")

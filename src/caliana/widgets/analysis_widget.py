@@ -34,13 +34,17 @@ propagation controls, so a heatmap pixel and a same-parameter ROI onset agree.
 read the intensity along it over time as a distance × time image
 (`analysis.kymograph`). No ROIs are involved: a response travelling along the
 path draws a diagonal band whose slope is its speed, which is the continuous
-counterpart of the per-ROI propagation fit. Values default to per-position ΔF/F,
-since raw brightness varies far more along a leaf than the response does.
+counterpart of the per-ROI propagation fit. Every point stays draggable, and
+`clear_last_point` / `clear_path` walk it back. Values default to per-position
+ΔF/F, since raw brightness varies far more along a leaf than the response does.
+
+Only the trace page needs ROIs, and it gates itself on them (`reload`) — the
+other two are dataset-wide, which is why the app opens this tab on a stack alone.
 
 Interaction logic lives in plain methods (`compute_dff`, `smooth_traces`,
-`compute_propagation`, `compute_onset_heatmap`, `add_path_point`, `finish_path`,
-`compute_kymograph`, `add_event`, `_redraw_traces`) so tests can drive it without
-a mouse.
+`compute_propagation`, `compute_onset_heatmap`, `add_path_point`,
+`clear_last_point`, `compute_kymograph`, `add_event`, `_redraw_traces`) so tests
+can drive it without a mouse.
 """
 from __future__ import annotations
 
@@ -99,10 +103,9 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._onset_lines: list = []
         self._prop_fit: dict | None = None   # snapshot of the last propagation scatter
 
-        # Kymograph page: the path being clicked out, its committed graphic, and
-        # the last computed result (kept for the figure export).
+        # Kymograph page: the path's points, the graphic drawn from them, and the
+        # last computed result (kept for the figure export).
         self._path_points: list[tuple[float, float]] = []
-        self._path_preview = None
         self._path_item = None
         self._kymo_result: dict | None = None
         # Frame size path clicks are bounds-checked against; a placeholder until a
@@ -366,27 +369,26 @@ class AnalysisWidget(QtWidgets.QWidget):
         """Trace a path on the stack, read the intensity along it over time.
 
         The movie (left) is where the path is drawn — scrub to a frame where the
-        response is visible, click along the feature to follow, and the sampled
-        line commits to a draggable, editable polyline. The kymograph (right) is
-        ``session.kymograph`` rendered as a distance × time image with a
-        draggable-level colour bar, mirroring the heatmap page.
+        response is visible, then click along the feature to follow. There is no
+        drawing mode to enter or leave: every click on the image extends the path,
+        and each point stays draggable afterwards (clicking a segment inserts one
+        between its ends), so a path is adjusted rather than redrawn. The
+        kymograph (right) is ``session.kymograph`` rendered as a distance × time
+        image with a draggable-level colour bar, mirroring the heatmap page.
         """
         page = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(page)
 
         row = QtWidgets.QHBoxLayout()
-        self.path_btn = QtWidgets.QPushButton("Draw path")
-        self.path_btn.setCheckable(True)
-        self.path_btn.setToolTip(
-            "Click points along the feature to follow; click again (or double-click "
-            "the image) to finish. The finished path can be dragged and reshaped."
-        )
-        self.path_btn.toggled.connect(self._on_path_toggled)
-        row.addWidget(self.path_btn)
+        # `clicked` carries a checked flag Qt would pass on as a positional
+        # argument, so both go through a lambda rather than connecting directly.
+        self.path_undo_btn = QtWidgets.QPushButton("Clear last point")
+        self.path_undo_btn.setToolTip("Remove the last point of the path")
+        self.path_undo_btn.clicked.connect(lambda: self.clear_last_point())
+        row.addWidget(self.path_undo_btn)
 
         self.path_clear_btn = QtWidgets.QPushButton("Clear path")
-        # Through a lambda: `clicked` carries a checked flag that would land on
-        # keep_mode and leave the draw button stuck down.
+        self.path_clear_btn.setToolTip("Remove every point and start over")
         self.path_clear_btn.clicked.connect(lambda: self.clear_path())
         row.addWidget(self.path_clear_btn)
 
@@ -429,6 +431,10 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.save_kymo_btn.clicked.connect(self._save_kymograph)
         row.addWidget(self.save_kymo_btn)
         row.addStretch(1)
+        # Standing instruction: with no mode button there is nothing else on
+        # screen saying that the image is what you click on.
+        self.kymo_hint = QtWidgets.QLabel("Click the image to add path points")
+        row.addWidget(self.kymo_hint)
         v.addLayout(row)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -548,7 +554,13 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.prop_plot.clear()
         self._prop_fit = None
         self.results.setPlainText("")
-        if self.session.data is not None and self.session.rois:
+        # Only the trace page needs ROIs; the heatmap and kymograph pages are
+        # dataset-wide, which is why the app opens this tab on a stack alone.
+        has_rois = bool(self.session.rois)
+        self.tabs.setTabEnabled(0, has_rois)
+        self.tabs.setTabToolTip(0, "ΔF/F, smoothing and propagation over the ROI traces"
+                                if has_rois else "Place at least one ROI first (ROIs tab)")
+        if self.session.data is not None and has_rois:
             self.session.extract_traces()
             T = self.session.traces.raw.shape[1]
             start = self._crop_start()
@@ -561,8 +573,13 @@ class AnalysisWidget(QtWidgets.QWidget):
             self.prop_region.setBounds((start, start + T))
             self.prop_region.setRegion((start, start + min(self.n_box.value(), T)))
             self.status.setText("")
+        elif self.session.data is None:
+            self.status.setText("Load a stack first.")
         else:
-            self.status.setText("Load a stack and place ROIs first.")
+            self.status.setText(
+                "No ROIs yet — trace analysis needs them; the heatmap and "
+                "kymograph pages work on the stack alone."
+            )
         if self.session.data is not None:
             # Heatmap baseline window: same leading frames as the trace baselines,
             # in original-frame coordinates, clamped to the (possibly cropped) span.
@@ -589,7 +606,8 @@ class AnalysisWidget(QtWidgets.QWidget):
         new (or re-imported, or re-registered) stack invalidates it exactly as it
         invalidates ROIs — the same reason ``Session._reset_derived`` drops those.
         """
-        self.clear_path()
+        self._path_points = []          # silently: reload owns the status line
+        self._rebuild_path_graphic()
         self.kymo_image.clear()
         self._kymo_result = None
         if self.session.data is None:
@@ -821,89 +839,111 @@ class AnalysisWidget(QtWidgets.QWidget):
         )
 
     # ------------------------------------------------------ kymograph path
-    def _on_path_toggled(self, checked: bool):
-        """Enter path-drawing on check; commit (or discard) the outline on uncheck."""
-        if checked:
-            self.start_path()
-        elif len(self._path_points) >= 2:
-            self._commit_path()
-        else:
-            self._clear_path_preview()
-            self.status.setText("A path needs at least two points; nothing kept.")
-
-    def start_path(self):
-        """Begin a new path, replacing whichever one is on the image."""
-        self.clear_path(keep_mode=True)
-        self._path_preview = pg.PlotDataItem(
-            pen=_PATH_PEN, symbol="o", symbolSize=6, symbolBrush="#00ff7f"
-        )
-        self.kymo_movie.view.addItem(self._path_preview)
-        self.status.setText("Click along the feature to follow; click ‘Draw path’ to finish.")
-
+    # ``_path_points`` is the path; the graphic is rebuilt from it whenever it
+    # changes, and dragging the graphic writes straight back into it. One
+    # direction each way, so a point can be clicked in, dragged, and undone
+    # without the two representations ever disagreeing.
     def add_path_point(self, row: float, col: float):
-        """Append a point to the path being drawn and redraw its preview."""
-        self._path_points.append((row, col))
-        if self._path_preview is not None:
-            ys = [p[0] for p in self._path_points]
-            xs = [p[1] for p in self._path_points]
-            self._path_preview.setData(xs, ys)
+        """Extend the path with a point at ``(row, col)``."""
+        self._path_points.append((float(row), float(col)))
+        self._rebuild_path_graphic()
+        self._report_path()
+        return self._path_points[-1]
 
-    def finish_path(self):
-        """Commit the path being drawn (needs >= 2 points)."""
-        # Unchecking the button routes through _on_path_toggled -> _commit_path.
-        self.path_btn.setChecked(False)
+    def clear_last_point(self):
+        """Drop the path's last point, wherever it has since been dragged to."""
+        if not self._path_points:
+            self.status.setText("No path to shorten.")
+            return
+        self._path_points.pop()
+        self._rebuild_path_graphic()
+        self._report_path()
 
-    def _commit_path(self):
-        """Turn the clicked points into a draggable, reshapeable open polyline."""
-        points = list(self._path_points)
-        self._clear_path_preview()
-        self._path_item = pg.PolyLineROI([(x, y) for (y, x) in points], closed=False,
-                                         pen=_PATH_PEN, movable=True)
-        self.kymo_movie.view.addItem(self._path_item)
-        self.status.setText(f"Path of {len(points)} points — drag it to adjust, then compute.")
-        return self._path_item
-
-    def clear_path(self, keep_mode: bool = False):
-        """Remove the path (drawn or in progress) from the image.
-
-        ``keep_mode`` leaves the draw button as it is; without it the button is
-        released, and silently — its ``toggled`` handler would otherwise commit
-        the very points this is discarding.
-        """
-        if not keep_mode and self.path_btn.isChecked():
-            blocker = QtCore.QSignalBlocker(self.path_btn)
-            self.path_btn.setChecked(False)
-            del blocker
-        self._clear_path_preview()
-        if self._path_item is not None:
-            self.kymo_movie.view.removeItem(self._path_item)
-            self._path_item = None
-
-    def _clear_path_preview(self):
-        if self._path_preview is not None:
-            self.kymo_movie.view.removeItem(self._path_preview)
-            self._path_preview = None
+    def clear_path(self):
+        """Remove the whole path from the image."""
         self._path_points = []
+        self._rebuild_path_graphic()
+        self.status.setText("Path cleared.")
 
     def path_points(self) -> list:
-        """The path as ``(y, x)`` points: the committed polyline, else the live one.
-
-        Read from the graphic rather than from what was clicked, so dragging or
-        reshaping the polyline moves the kymograph with it.
-        """
-        if self._path_item is not None:
-            return polyline_vertices(self._path_item)
+        """The path as ``(y, x)`` image points, in the order they were placed."""
         return list(self._path_points)
 
+    def _report_path(self):
+        n = len(self._path_points)
+        if n == 0:
+            self.status.setText("Click the image to start a path.")
+        elif n == 1:
+            self.status.setText("Path started — click again to extend it.")
+        else:
+            self.status.setText(
+                f"Path of {n} points — drag any point to adjust, then compute."
+            )
+
+    def _rebuild_path_graphic(self):
+        """Redraw the path graphic from ``_path_points``.
+
+        Two points make it an open ``PolyLineROI``, whose handles are individually
+        draggable (and whose segments accept a click to insert a point); a single
+        point has no line yet, so it is shown as a plain marker until it does.
+        """
+        self._remove_path_graphic()
+        points = self._path_points
+        if len(points) >= 2:
+            # pyqtgraph works in (x, y); the session and every path API here are
+            # in image (y, x) order.
+            self._path_item = pg.PolyLineROI([(x, y) for (y, x) in points],
+                                             closed=False, pen=_PATH_PEN, movable=True)
+            self._path_item.sigRegionChanged.connect(self._on_path_moved)
+        elif len(points) == 1:
+            y, x = points[0]
+            self._path_item = pg.PlotDataItem([x], [y], pen=None, symbol="o",
+                                              symbolSize=8, symbolBrush="#00ff7f")
+        else:
+            return
+        self.kymo_movie.view.addItem(self._path_item)
+
+    def _remove_path_graphic(self):
+        """Take the path graphic off the image, muted so its own teardown moves
+        (handles being dropped) can't be mistaken for the user editing it."""
+        if self._path_item is None:
+            return
+        if isinstance(self._path_item, pg.PolyLineROI):
+            self._path_item.sigRegionChanged.disconnect(self._on_path_moved)
+        self.kymo_movie.view.removeItem(self._path_item)
+        self._path_item = None
+
+    def _on_path_moved(self):
+        """A dragged point (or one inserted on a segment) writes the path back."""
+        points = polyline_vertices(self._path_item)
+        if len(points) < 2:     # mid-edit / teardown — keep the last valid path
+            return
+        self._path_points = points
+
+    def _click_hits_path(self, scene_pos) -> bool:
+        """Whether a click landed on the path graphic or one of its handles.
+
+        Those clicks belong to the polyline — dragging a point, or inserting one
+        on a segment — so they must not *also* drop a new point at the far end.
+        """
+        if self._path_item is None:
+            return False
+        for item in self.kymo_movie.view.scene().items(scene_pos):
+            node = item
+            while node is not None:
+                if node is self._path_item:
+                    return True
+                node = node.parentItem()
+        return False
+
     def _on_kymo_click(self, ev):
-        """Left clicks add path points while drawing; a double-click finishes."""
-        if ev.button() != _LEFT or not self.path_btn.isChecked():
+        """A left click on the image extends the path; clicks on it are its own."""
+        # The second click of a double-click would otherwise stack a duplicate
+        # point on top of the first one's.
+        if ev.button() != _LEFT or ev.double() or self._click_hits_path(ev.scenePos()):
             return
         p = self.kymo_movie.view.mapSceneToView(ev.scenePos())
         row, col = p.y(), p.x()
-        if ev.double():
-            self.finish_path()
-            return
         height, width = self._kymo_shape_yx
         if 0 <= row < height and 0 <= col < width:
             self.add_path_point(row, col)
@@ -917,8 +957,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         points = self.path_points()
         if len(points) < 2:
             self.status.setText(
-                "Draw a path first: click ‘Draw path’, click along the feature, "
-                "then click it again."
+                "A path needs at least two points — click along the feature on the image."
             )
             return None
         dff = self.kymo_signal_box.currentText() == _KYMO_DFF

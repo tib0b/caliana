@@ -125,7 +125,10 @@ class LeafRegion:
 class RegistrationResult:
     """Whole-session registration state."""
     mode: RegistrationMode = RegistrationMode.NONE
-    reference: str = "mean"                               # "mean" | "first" | "previous"
+    # What an un-run registration reports, and so what the registration widget
+    # opens on (it mirrors this field). Explicit `Session.register(reference=...)`
+    # calls are unaffected.
+    reference: str = "previous"                           # "mean" | "first" | "previous"
     transforms: list[RigidTransform] = field(default_factory=list)   # whole-frame mode
 
 
