@@ -14,15 +14,42 @@ import caliana
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     import pyqtgraph as pg
+    from qtpy import QtCore
     from caliana.widgets._qt import ensure_app
     from caliana.widgets.import_widget import ImportPreviewWidget
     from caliana.widgets.leaf_widget import LeafSelectionWidget
     from caliana.widgets.roi_widget import RoiSelectionWidget
     from caliana.widgets.crop_widget import CropTracesWidget
     from caliana.widgets.analysis_widget import AnalysisWidget
+    from caliana.widgets.registration_widget import RegistrationWidget
+    from caliana.widgets.source_widget import SourceWidget
     HAVE_GUI = True
 except Exception:  # pragma: no cover - depends on optional deps
     HAVE_GUI = False
+
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
+                    "synthetic_calcium_imaging.tif")
+
+# Message boxes are modal: shown for real they would block these tests forever
+# with nobody to dismiss them. Record them instead, so a test can also assert
+# that the failure *was* reported to the user.
+DIALOGS: list[tuple[str, str]] = []
+if HAVE_GUI:
+    from qtpy import QtWidgets as _QtWidgets
+
+    def _record(kind):
+        def shim(_parent, title, text, *args, **kwargs):
+            DIALOGS.append((title, text))
+            return _QtWidgets.QMessageBox.StandardButton.Ok
+        return staticmethod(shim)
+
+    for _kind in ("critical", "warning", "information", "about"):
+        setattr(_QtWidgets.QMessageBox, _kind, _record(_kind))
+
+# Every panel of the standalone app, in workflow order. They share one contract:
+# construct on any Session, `reload()` to re-read it.
+PANELS = (SourceWidget, ImportPreviewWidget, RegistrationWidget,
+          RoiSelectionWidget, CropTracesWidget, AnalysisWidget) if HAVE_GUI else ()
 
 
 def _session():
@@ -443,7 +470,7 @@ def test_analysis_widget_onset_heatmap():
     s.add_roi(center=(4, 6), size=3)
 
     w = AnalysisWidget(s)
-    assert w.tabs.count() == 2 and w.tabs.tabText(1) == "Heatmaps"
+    assert w.tabs.tabText(1) == "Heatmaps"
 
     # fraction_of_max over the whole trace (no baseline window) matches onset_time per pixel.
     w.hm_base_start.setValue(0)
@@ -474,6 +501,131 @@ def test_analysis_widget_onset_heatmap():
 
     w.close()
     print("analysis widget onset heatmap OK")
+
+
+def test_analysis_widget_kymograph():
+    """The Kymograph page: click out a path, commit it as an editable polyline, and
+    read the intensity along it over time as a distance × time image."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+
+    # A step response sweeping left to right at 1 px per frame from frame 12 — a
+    # diagonal band for the kymograph to show, and clear of the 10-frame baseline.
+    T, Y, X = 40, 12, 20
+    stack = np.full((T, Y, X), 10.0, dtype=np.float32)
+    for x in range(X):
+        stack[12 + x:, :, x] += 20.0
+    s = caliana.Session()
+    s.data = stack
+    s.timeline = caliana.Timeline(n_frames=T)
+    s.add_roi(center=(6, 10), size=3)
+
+    w = AnalysisWidget(s)
+    assert w.tabs.count() == 3 and w.tabs.tabText(2) == "Kymograph"
+
+    # Nothing drawn yet: computing says what to do rather than raising.
+    assert w.compute_kymograph() is None
+    assert "Draw a path" in w.status.text()
+
+    # Draw a path along the row, then finish it: the clicks become one editable,
+    # draggable polyline, and the points read back from the graphic.
+    w.path_btn.setChecked(True)
+    for col in (2, 10, 17):
+        w.add_path_point(6, col)
+    assert w._path_preview is not None
+    w.finish_path()
+    assert not w.path_btn.isChecked() and w._path_preview is None
+    assert isinstance(w._path_item, pg.PolyLineROI)
+    points = w.path_points()
+    assert [(round(y), round(x)) for y, x in points] == [(6, 2), (6, 10), (6, 17)]
+
+    # ΔF/F is the default; the kymograph is one row per pixel along the path.
+    assert w.kymo_signal_box.currentText() == "ΔF/F"
+    result = w.compute_kymograph()
+    assert result is not None and s.analyses["kymograph"] is result
+    values = result["values"]
+    assert values.shape == (16, T)                   # 15 px of path, both ends
+    assert result["baseline"] == (0, w.kymo_base_box.value())
+    # Each position steps from 0 to 20/10 = 2 ΔF/F, one frame later than the last.
+    onsets = np.argmax(values > 1.0, axis=1)
+    assert np.allclose(np.diff(onsets), 1.0)
+    assert np.allclose(values.max(axis=1), 2.0)
+
+    # Raw values instead: same shape, the untouched intensities, baseline disabled.
+    w.kymo_signal_box.setCurrentText("raw intensity")
+    assert not w.kymo_base_box.isEnabled()
+    raw = w.compute_kymograph()["values"]
+    assert raw.shape == values.shape
+    assert np.allclose(raw[0], stack[:, 6, 2])
+    assert raw.min() == 10.0 and raw.max() == 30.0
+
+    # The image is placed in data coordinates: frames across, path length up.
+    rect = w.kymo_image.mapRectToView(w.kymo_image.boundingRect())
+    assert (rect.width(), rect.height()) == (T, 15.0)
+    assert w.kymo_plot.getAxis("left").labelText.endswith("(px)")
+
+    # Calibrating relabels and rescales both axes of the kymograph already on
+    # screen — the sampled values never move, only the units they're reported in.
+    w.interval_box.setValue(0.5)
+    w.pixel_box.setValue(2.0)
+    assert w.kymo_plot.getAxis("bottom").labelText == "time (s)"
+    assert w.kymo_plot.getAxis("left").labelText.endswith("(µm)")
+    rect = w.kymo_image.mapRectToView(w.kymo_image.boundingRect())
+    assert (rect.width(), rect.height()) == (T * 0.5, 15.0 * 2.0)
+
+    # Clearing drops the path; the next compute asks for a new one.
+    w.clear_path()
+    assert w._path_item is None and w.path_points() == []
+    assert w.compute_kymograph() is None
+
+    # Clicks only reach the path while ‘Draw path’ is down — otherwise the image
+    # is just an image (and the clear button's checked flag doesn't jam the mode).
+    w._on_kymo_click(_Click(QtCore.QPointF(5.0, 5.0)))
+    assert w.path_points() == [] and not w.path_btn.isChecked()
+
+    # Drawing, a double-click finishes the path where it stands.
+    w.path_btn.setChecked(True)
+    w.add_path_point(6, 2)
+    w.add_path_point(6, 17)
+    w._on_kymo_click(_Click(QtCore.QPointF(5.0, 5.0), double=True))
+    assert not w.path_btn.isChecked() and isinstance(w._path_item, pg.PolyLineROI)
+
+    w.close()
+    print("analysis widget kymograph OK")
+
+
+def test_analysis_widget_kymograph_path_is_dropped_on_reload():
+    """A path is pixel coordinates on the stack it was drawn over, so a reload —
+    a new stack, a re-registration — clears it, as it does the ROI graphics."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    s.add_roi(center=(16, 12), size=4)
+    w = AnalysisWidget(s)
+
+    w.path_btn.setChecked(True)
+    w.add_path_point(4, 4)
+    w.add_path_point(20, 18)
+    w.finish_path()
+    assert w.compute_kymograph() is not None
+
+    w.reload()
+    assert w._path_item is None and w.path_points() == []
+    assert w._kymo_result is None
+    assert w._kymo_shape_yx == s.data.shape[1:]
+
+    # A half-drawn path doesn't survive either, and doesn't commit on the way out.
+    w.path_btn.setChecked(True)
+    w.add_path_point(3, 3)
+    w.reload()
+    assert w._path_item is None and not w.path_btn.isChecked()
+
+    w.close()
+    print("analysis widget kymograph reload OK")
 
 
 def test_analysis_widget_propagation_uses_displayed_signal():
@@ -723,6 +875,280 @@ def test_stack_contrast_scales_on_first_frame():
     print("first-frame stack contrast OK")
 
 
+def test_panels_build_on_an_empty_session():
+    """Every panel constructs against a Session with no data and stays usable.
+
+    The app builds all of them up front, before any file is chosen, so nothing
+    may assume a stack exists — the crop widget previewing traces, the ROI widget
+    bounds-checking a click, the analysis widget reading a frame count.
+    """
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    for cls in PANELS:
+        s = caliana.Session()
+        w = cls(s)
+        w.reload()                       # idempotent, and a no-op without data
+        w.close()
+
+    # A click with no stack loaded is bounds-checked, not an AttributeError.
+    s = caliana.Session()
+    w = RoiSelectionWidget(s)
+    assert w._shape_yx == (1, 1)
+    w._on_scene_click(_Click(QtCore.QPointF(5.0, 5.0)))
+    assert s.rois == []
+    w.close()
+    print("panels build on empty session OK")
+
+
+class _Click:
+    """The bits of a pyqtgraph scene click the ROI widget actually reads."""
+
+    def __init__(self, pos, double=False):
+        self._pos, self._double = pos, double
+
+    def button(self):
+        return QtCore.Qt.MouseButton.LeftButton
+
+    def scenePos(self):
+        return self._pos
+
+    def double(self):
+        return self._double
+
+
+def test_panels_reload_into_a_changed_session():
+    """`reload()` re-reads the Session, and repeating it never duplicates anything.
+
+    This is what lets the app keep one set of panels across a whole run: the
+    session changes underneath (a file loaded, ROIs placed, a crop applied) and
+    each tab catches up when it is next opened.
+    """
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = caliana.Session()
+    panels = [cls(s) for cls in PANELS]
+
+    # The session gains a stack, two ROIs and a leaf box after every panel exists.
+    s.data = (np.random.default_rng(1).random((10, 32, 24)) * 255).astype(np.uint16)
+    s.timeline = caliana.Timeline(n_frames=10)
+    s.add_leaf_region((0, 16, 0, 12))
+    s.add_roi(center=(16, 12), size=4)
+    s.add_roi(center=(8, 6), size=3)
+    for w in panels:
+        w.reload()
+        w.reload()                       # twice: graphics must not accumulate
+
+    by_type = {type(w): w for w in panels}
+    roi_w = by_type[RoiSelectionWidget]
+    assert len(roi_w._roi_records) == 2 and len(roi_w._leaf_records) == 1
+    assert roi_w._shape_yx == (32, 24)
+    leaf_w = by_type[RegistrationWidget].leaf_panel
+    assert len(leaf_w._leaf_records) == 1
+    crop_w = by_type[CropTracesWidget]
+    assert crop_w._preview.raw.shape == (2, 10)
+    assert crop_w.end_box.value() == 10 and crop_w.crop_btn.isEnabled()
+    analysis_w = by_type[AnalysisWidget]
+    assert len(analysis_w._curves) == 2
+
+    # A crop applied elsewhere shows up on the next reload of each panel.
+    s.set_crop(2, 8)
+    for w in panels:
+        w.reload()
+    assert crop_w.start_box.value() == 2 and crop_w.end_box.value() == 8
+    assert analysis_w._curves[0].getData()[0][0] == 2      # original frame coords
+
+    for w in panels:
+        w.close()
+    print("panels reload into changed session OK")
+
+
+def test_session_revision_tracks_changes():
+    """`Session._revision` moves on every change a panel would need to redraw for.
+
+    It is the app's whole change-propagation mechanism (no widget knows about any
+    other), so anything that changes what a panel shows has to bump it.
+    """
+    s = caliana.Session()
+    s.data = (np.random.default_rng(3).random((6, 16, 12)) * 255).astype(np.uint16)
+    s.timeline = caliana.Timeline(n_frames=6)
+
+    revisions = []
+    for change in (lambda: s.add_leaf_region((0, 8, 0, 6)),
+                   lambda: s.add_roi(center=(8, 6), size=3),
+                   lambda: s.set_crop(1, 5),
+                   lambda: s.set_frame_interval(0.5),
+                   lambda: s.set_pixel_size(2.0),
+                   lambda: s.extract_traces() and s._invalidate_traces()):
+        before = s._revision
+        change()
+        revisions.append(s._revision - before)
+    assert all(delta > 0 for delta in revisions), revisions
+    print("session revision OK")
+
+
+def test_load_resets_derived_state():
+    """Loading drops ROIs/leaf boxes/registration from the previous stack.
+
+    They are expressed in that stack's pixel coordinates, so carrying them into
+    another file (or the same file re-imported at a coarser step, which the app's
+    Import tab makes a one-click operation) would silently measure the wrong
+    pixels.
+    """
+    s = caliana.Session.from_file(DATA)
+    s.add_leaf_region((0, 16, 0, 16))
+    s.add_roi(center=(20, 20), size=4)
+    s.extract_traces()
+    s.set_crop(1, 10)
+    before = s._revision
+
+    s.load(DATA, spatial_step=2)
+    assert s.rois == [] and s.leaf_regions == []
+    assert s.crop_window is None and s.traces is None
+    assert s.registered_data is None and not s.track_motion
+    assert s.registration.mode == caliana.RegistrationMode.NONE
+    assert s._revision > before
+    print("load resets derived state OK")
+
+
+def test_crop_widget_signals_instead_of_closing():
+    """Validating a crop emits `applied` and leaves the widget open.
+
+    The app keeps the tab; the notebook wrapper is what closes the window on that
+    signal (`_qt.run_widget_blocking(close_on=...)`), so one widget serves both.
+    """
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    s.add_roi(center=(16, 12), size=4)
+    w = CropTracesWidget(s)
+
+    seen, closed = [], []
+    w.applied.connect(lambda: seen.append(True))
+    w.closed.connect(lambda: closed.append(True))
+    w.show()
+    w.set_interval(1, 5)
+    w.apply_crop()
+
+    assert seen == [True] and closed == []        # announced, not closed
+    assert w.isVisible()
+    assert s.crop_window == (1, 5)
+
+    # …and the notebook wrapper's wiring is what turns that into a close.
+    w.applied.connect(w.close)
+    w.apply_crop()
+    assert closed == [True]
+    w.close()
+    print("crop widget applied signal OK")
+
+
+def test_source_widget_loads_a_file():
+    """The import panel turns its controls into ImportParams and loads through them."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = caliana.Session()
+    w = SourceWidget(s)
+    w.set_path(DATA)
+    w.tstep_box.setValue(2)
+    w.sstep_box.setValue(2)
+    w.window_check.setChecked(True)
+    for spin, value in zip(w.window_boxes, (0, 32, 0, 48)):
+        spin.setValue(value)
+
+    params = w.import_params()
+    assert params.temporal_step == 2 and params.spatial_step == 2
+    assert params.spatial_window == (0, 32, 0, 48) and params.end is None
+
+    loaded = []
+    w.loaded.connect(lambda sess: loaded.append(sess))
+    task = w.load()
+    assert task.wait() and task.error is None
+
+    assert loaded == [s]                       # the same Session, loaded in place
+    assert s.data.shape == (50, 16, 24)        # 100 frames /2, (32, 48) /2
+    assert s.source.import_params.spatial_window == (0, 32, 0, 48)
+
+    # Re-importing at another step is one click, and starts from a clean slate.
+    w.sstep_box.setValue(1)
+    task = w.load()
+    assert task.wait() and task.error is None
+    assert s.data.shape == (50, 32, 48)
+    w.close()
+    print("source widget load OK")
+
+
+def test_source_widget_reports_a_bad_file():
+    """An unreadable file is reported, not raised, and leaves the session empty."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = caliana.Session()
+    w = SourceWidget(s)
+    w.set_path(DATA + ".nope.xyz")
+    DIALOGS.clear()
+    task = w.load()
+    assert task.wait()
+    assert isinstance(task.error, (ValueError, FileNotFoundError))
+    assert s.data is None
+    assert "Could not load" in w.status.text()
+    # Reported to the user, in terms of what to do about it — not a traceback.
+    assert DIALOGS and DIALOGS[-1][0] == "Load failed"
+    assert ".tif" in DIALOGS[-1][1]
+    w.close()
+    print("source widget bad file OK")
+
+
+def test_registration_widget_runs():
+    """The registration panel drives Session.register and reports what it did."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    from caliana.models import RegistrationMode
+
+    s = caliana.Session.from_file(DATA, temporal_step=10)   # 10 frames
+    w = RegistrationWidget(s)
+
+    # None mode: no boxes, no estimator controls, nothing to warp.
+    assert w.mode == RegistrationMode.NONE
+    assert w.left_stack.currentIndex() == 0 and not w.ref_box.isEnabled()
+
+    # Per-leaf without boxes refuses rather than raising out of the worker.
+    w.mode_box.setCurrentText("Per leaf")
+    assert w.left_stack.currentIndex() == 1 and w.ref_box.isEnabled()
+    assert w.run() is None and "leaf box" in w.status.text()
+
+    # With a box drawn on the embedded leaf pane it runs, per leaf.
+    w.leaf_panel.add_leaf_box((4, 60, 4, 60))
+    w.transform_box.setCurrentText("rigid_body")
+    task = w.run()
+    assert task.wait() and task.error is None
+    assert s.registration.mode == RegistrationMode.PER_LEAF
+    assert len(s.leaf_regions[0].transforms) == len(s.data)
+    assert s.registered_data is not None                 # "Warp the stack"
+    assert "per-leaf" in w.summary() and "leaf 0" in w.summary()
+
+    # Whole frame, correcting by moving the ROIs instead of warping.
+    w.mode_box.setCurrentText("Whole frame")
+    w.apply_box.setCurrentIndex(1)
+    task = w.run()
+    assert task.wait() and task.error is None
+    assert s.registration.mode == RegistrationMode.WHOLE_FRAME
+    assert s.registered_data is None and s.track_motion
+    assert len(s.registration.transforms) == len(s.data)
+    assert "ROIs follow the tissue" in w.summary()
+    w.close()
+    print("registration widget OK")
+
+
 if __name__ == "__main__":
     test_stack_contrast_scales_on_first_frame()
     test_import_preview_widget()
@@ -736,7 +1162,17 @@ if __name__ == "__main__":
     test_analysis_widget_smoothing()
     test_analysis_widget_analysis_selection()
     test_analysis_widget_onset_heatmap()
+    test_analysis_widget_kymograph()
+    test_analysis_widget_kymograph_path_is_dropped_on_reload()
     test_analysis_widget_propagation_uses_displayed_signal()
     test_analysis_widget_propagation_direction_mode()
     test_analysis_widget_derivative_onset()
     test_analysis_widget_spatial_scale()
+    test_panels_build_on_an_empty_session()
+    test_panels_reload_into_a_changed_session()
+    test_session_revision_tracks_changes()
+    test_load_resets_derived_state()
+    test_crop_widget_signals_instead_of_closing()
+    test_source_widget_loads_a_file()
+    test_source_widget_reports_a_bad_file()
+    test_registration_widget_runs()

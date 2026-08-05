@@ -45,6 +45,7 @@ s.compute_dff(n=12)
 res = s.cross_roi_propagation(signal="dff")     # speed, direction, source ROI
 # direction_mode="roi_line" (default) fits the speed along the line the ROIs sit
 # on; "auto" fits a free 2D direction, which needs ROIs spread in two dimensions.
+kymo = s.kymograph([(10, 5), (30, 40)], baseline=(0, 12))   # distance × time image
 s.export_traces("traces.csv")
 s.export_provenance("provenance.json")
 ```
@@ -96,11 +97,39 @@ Once set, traces read in seconds (plot axes, the CSV's `seconds` column), ROI
 distances in µm, propagation speed in µm/s — each axis degrading independently to
 frames/pixels when uncalibrated — and saved images carry a scale bar.
 
-Interactive (after `%gui qt` in a notebook): `s.preview()` (Stage I),
+Interactive (after `%gui qt` in a notebook): `caliana.open_session()` to pick a
+file and its import parameters in a window, then `s.preview()` (Stage I),
 `s.select_rois()` (Stage II), `s.analyze()` (Stage III). Each reads and writes the
 same `Session`, so widgets and API calls mix freely.
 [`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks the full headless
 workflow end-to-end with rendered plots. [`examples/interactive.ipynb`](examples/interactive.ipynb) shows an example workflow using the interactive PyQt widgets.
+
+## Standalone app
+
+The same widgets, wrapped in one window with the workflow as tabs — no Python
+required to run an analysis:
+
+```bash
+caliana                 # or: caliana path/to/movie.nd2
+```
+
+Each tab stays closed until its prerequisite exists (no ROIs before a stack, no
+analysis before ROIs), the status bar carries the run — source, `[T,Y,X]`,
+calibration, registration mode, ROI count, crop — and `File ▸ Export` writes the
+traces CSV, the stack TIFF and the provenance JSON, together or one at a time.
+Long steps (loading, registration, export) run off the UI thread behind a
+progress dialog, and failures are reported in a dialog rather than a traceback.
+
+The session is shared by every tab: registering on tab 2 invalidates the traces
+tab 5 draws, and each panel re-reads the session when it is next opened.
+
+To build a self-contained bundle needing no Python install (see
+[`caliana.spec`](caliana.spec) for what it pins and why):
+
+```bash
+pip install -e . pyinstaller
+pyinstaller caliana.spec        # -> dist/caliana/
+```
 
 ## Package layout
 
@@ -112,11 +141,11 @@ workflow end-to-end with rendered plots. [`examples/interactive.ipynb`](examples
 | `io.py` | Load TIFF/nd2 + downsample-on-load + scale metadata (§3 Stage I) |
 | `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
 | `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
-| `analysis.py` | ΔF/F, response-onset timing, propagation, custom callables (§3 Stage III) |
+| `analysis.py` | ΔF/F, response-onset timing, propagation, kymographs, custom callables (§3 Stage III) |
 | `export.py` | Traces CSV, stack TIFF, provenance JSON (§4) |
 | `session.py` | `Session`: single source of truth tying it together (§2.1) |
 | `widgets/` | Embeddable PyQt widgets + notebook blocking wrappers (§2.2) |
-| `app.py` | Standalone app entry point (Phase 2) |
+| `app.py` | Standalone app: window, tabs, menus, error handling (§1 Phase 2) |
 
 ## Tests
 

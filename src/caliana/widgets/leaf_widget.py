@@ -38,7 +38,7 @@ class LeafSelectionWidget(QtWidgets.QWidget):
         self._shape_yx = (1, 1)
 
         self._build_ui()
-        self._load_session()
+        self.reload()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -67,10 +67,21 @@ class LeafSelectionWidget(QtWidgets.QWidget):
         self.image.ui.histogram.gradient.hide()
         layout.addWidget(self.image, stretch=1)
 
-    def _load_session(self):
+    def reload(self):
+        """Re-read the Session and redraw. Safe to call any number of times.
+
+        Existing box graphics are dropped first, so a session whose leaf regions
+        changed elsewhere (or whose stack was replaced) comes back with exactly
+        one graphic per model box rather than duplicates.
+        """
+        self._clear_leaf_graphics()
         if self.session.data is None:
+            self._shape_yx = (1, 1)
             self.image.setImage(np.zeros((1, 1, 1)))
+            self.leaf_btn.setEnabled(False)
+            self.hint.setText("No data loaded.")
             return
+        self.leaf_btn.setEnabled(True)
         stack = np.asarray(self.session._working_stack())
         self._shape_yx = stack.shape[1:]
         # Same first-frame [min, 99th pct] contrast as the import preview, so a
@@ -80,6 +91,13 @@ class LeafSelectionWidget(QtWidgets.QWidget):
         # Re-draw any leaf boxes already on the session.
         for i, leaf in enumerate(list(self.session.leaf_regions)):
             self._add_leaf_graphic(i, leaf)
+
+    def _clear_leaf_graphics(self):
+        """Remove every box graphic, leaving the session's models untouched."""
+        for record in self._leaf_records:
+            self.image.view.removeItem(record["item"])
+            self.image.view.removeItem(record["text"])
+        self._leaf_records.clear()
 
     # ---------------------------------------------------------- leaf boxes
     def add_leaf_box(self, bbox=None):
@@ -123,6 +141,7 @@ class LeafSelectionWidget(QtWidgets.QWidget):
         self.image.view.removeItem(record["item"])
         self.image.view.removeItem(record["text"])
         self.session.leaf_regions.remove(record["model"])
+        self.session._bump()       # other panels draw these boxes too
 
     # -------------------------------------------------------------- events
     def closeEvent(self, event):

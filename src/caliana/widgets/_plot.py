@@ -39,6 +39,21 @@ def dff0(raw) -> np.ndarray:
         return np.where(f0 != 0, (raw - f0) / f0, 0.0)
 
 
+def polyline_vertices(item) -> list[tuple[float, float]]:
+    """Current vertices of a ``pg.PolyLineROI`` as ``(y, x)`` image coordinates.
+
+    Handle positions are ROI-local, so they are mapped back to the parent (image)
+    frame — which is what makes them readable after the whole outline has been
+    dragged, not just after a single handle moved. Shared by the ROI widget's
+    free-hand polygons and the analysis widget's kymograph path.
+    """
+    out = []
+    for handle in item.getHandles():
+        p = item.mapToParent(handle.pos())
+        out.append((p.y(), p.x()))
+    return out
+
+
 class FrameTimeAxis(pg.AxisItem):
     """Bottom axis that relabels frame ticks as seconds when calibrated.
 

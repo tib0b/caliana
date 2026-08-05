@@ -26,7 +26,7 @@ from .. import figures
 from ..models import ROIShape
 from ..registration import map_point
 from ..roi import polygon_centroid
-from ._plot import FrameTimeAxis, dff0, frame_interval, pixel_size
+from ._plot import FrameTimeAxis, dff0, frame_interval, pixel_size, polyline_vertices
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
@@ -51,6 +51,10 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         # Bookkeeping: parallel records linking model ROIs to their graphics.
         self._roi_records: list[dict] = []
         self._leaf_records: list[dict] = []
+        # Frame size clicks are bounds-checked against; a placeholder until a
+        # stack is loaded, so clicking an empty widget places nothing instead of
+        # raising.
+        self._shape_yx = (1, 1)
         # When True the preview shows raw footage and ROI markers track tissue
         # per-frame; placement/editing is paused so the two don't conflict.
         self._tracking = False
@@ -59,7 +63,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self._poly_preview = None
 
         self._build_ui()
-        self._load_session()
+        self.reload()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -145,9 +149,21 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         self.image.view.scene().sigMouseClicked.connect(self._on_scene_click)
         self.image.sigTimeChanged.connect(self._on_frame_changed)
 
-    def _load_session(self):
+    def reload(self):
+        """Re-read the Session and redraw. Safe to call any number of times.
+
+        The app calls this when the ROI tab is activated after the session moved
+        on — a new stack, or registration having just produced (or dropped) the
+        transforms the track-motion toggle needs. Every graphic is rebuilt from
+        the models, so nothing is drawn twice and no marker outlives its ROI.
+        """
+        self._clear_graphics()
         if self.session.data is None:
+            self._shape_yx = (1, 1)
             self.image.setImage(np.zeros((1, 1, 1)))
+            self.track_box.setEnabled(False)
+            self.hint.setText("No data loaded.")
+            self.trace_plot.clear()
             return
         stack = np.asarray(self.session._working_stack())
         self._shape_yx = stack.shape[1:]
@@ -162,7 +178,27 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         for i, leaf in enumerate(list(self.session.leaf_regions)):
             self._add_leaf_reference(i, leaf)
         self.track_box.setEnabled(self.session._has_transforms())
+        self.hint.setText("Click the image to place an ROI")
         self._refresh_traces()
+
+    def _clear_graphics(self):
+        """Drop every ROI/leaf graphic and any half-drawn outline.
+
+        Models on the session are untouched — ``reload`` rebuilds the graphics
+        from them straight after. Tracking is switched off first: it holds the
+        raw stack on screen and pauses editing, neither of which should survive
+        into a freshly loaded session.
+        """
+        if self._tracking:
+            self.track_box.setChecked(False)
+        self._clear_polygon_preview()
+        if self.poly_btn.isChecked():
+            self.poly_btn.setChecked(False)
+        for record in self._roi_records + self._leaf_records:
+            self.image.view.removeItem(record["item"])
+            self.image.view.removeItem(record["text"])
+        self._roi_records.clear()
+        self._leaf_records.clear()
 
     # ------------------------------------------------------- current controls
     @property
@@ -277,11 +313,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
     @staticmethod
     def _polygon_item_vertices(item) -> list[tuple[float, float]]:
         """Current polygon vertices as (y, x) in image coordinates."""
-        out = []
-        for h in item.getHandles():
-            p = item.mapToParent(h.pos())
-            out.append((p.y(), p.x()))
-        return out
+        return polyline_vertices(item)
 
     def delete_last_roi(self):
         if not self._roi_records:
@@ -402,6 +434,8 @@ class RoiSelectionWidget(QtWidgets.QWidget):
 
     def _on_track_toggled(self, checked: bool):
         self._tracking = bool(checked)
+        if self.session.data is None:      # nothing to show either way
+            return
         # A half-drawn outline can't survive the switch to the raw view; drop it.
         if self._tracking and self.poly_btn.isChecked():
             self.poly_btn.setChecked(False)
@@ -468,7 +502,7 @@ class RoiSelectionWidget(QtWidgets.QWidget):
         """
         self.trace_plot.clear()
         self._sync_time_axis()
-        if not self.session.rois:
+        if self.session.data is None or not self.session.rois:
             return
         traces = self.session.extract_traces()
         data = dff0(traces.raw)

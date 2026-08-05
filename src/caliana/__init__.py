@@ -28,7 +28,30 @@ from .session import Session
 from .space import SpatialScale
 from .timeline import Event, Timeline
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
+
+
+def open_session(path=None) -> Session:
+    """[notebook] Open the file/import widget (blocking) → the loaded ``Session``.
+
+    The interactive counterpart of ``Session.from_file``: pick the recording and
+    the downsample-on-load parameters in a window, press Load, close it. The
+    Session comes back loaded (or empty, if the window was closed without
+    loading). ``path`` pre-fills the file box.
+
+        s = caliana.open_session()          # or open_session("movie.nd2")
+    """
+    from .widgets._qt import run_widget_blocking
+    from .widgets.source_widget import SourceWidget
+
+    def factory():
+        widget = SourceWidget(Session())
+        if path is not None:
+            widget.set_path(path)
+        return widget
+
+    return run_widget_blocking(factory)
+
 
 __all__ = [
     "ROI",
@@ -45,4 +68,5 @@ __all__ = [
     "Timeline",
     "Traces",
     "__version__",
+    "open_session",
 ]

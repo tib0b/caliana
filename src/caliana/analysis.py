@@ -1,8 +1,9 @@
 """Analyses on ROI traces.
 
 Built-ins: ΔF/F (``compute_dff``), Gaussian smoothing (``smooth_traces``),
-response-onset timing (``onset_time``, ``onset_time_map``), and cross-ROI
-propagation (``cross_roi_propagation``). Custom analyses are plain callables
+response-onset timing (``onset_time``, ``onset_time_map``), kymographs along a
+hand-drawn path (``kymograph``), and cross-ROI propagation
+(``cross_roi_propagation``). Custom analyses are plain callables
 ``f(traces, data) -> result`` (full trust, no sandbox), run via ``apply_custom``.
 """
 from __future__ import annotations
@@ -232,6 +233,138 @@ def onset_time_map(
                       (jj - 1) + (thr - y0) / np.where(denom == 0, 1.0, denom))
     onset[cols] = np.where(jj == start, float(start), interp)
     return onset.reshape(Yb, Xb)
+
+
+def resample_path(points, step: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """Evenly spaced samples along a polyline → ``(coords [n, 2] (y, x), distance [n])``.
+
+    ``points`` is a list of ``(y, x)`` vertices (at least 2, in pixels). Samples
+    land every ``step`` pixels of arc length, with both ends always included (so
+    the final interval is short unless the path divides evenly). ``distance`` is
+    the arc length from the first vertex, which is what indexes a kymograph's
+    space axis. Repeated (zero-length) segments — a double-clicked point — are
+    skipped rather than raising.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError(f"path must be a list of (y, x) points; got shape {pts.shape}")
+    if len(pts) < 2:
+        raise ValueError("a path needs at least 2 points")
+    if step <= 0:
+        raise ValueError(f"step must be > 0, got {step!r}")
+
+    seg = np.hypot(*np.diff(pts, axis=0).T)          # length of each segment
+    knots = np.concatenate([[0.0], np.cumsum(seg)])  # arc length at each vertex
+    total = float(knots[-1])
+    if total < 1e-9:      # also the floor that keeps at least two samples below
+        raise ValueError("path has zero length (all its points coincide)")
+
+    distance = np.arange(0.0, total, step)
+    if distance[-1] < total - 1e-9:
+        distance = np.append(distance, total)        # always land on the far end
+    else:
+        distance[-1] = total                         # float wobble; snap, don't duplicate
+    # Interpolate each coordinate against arc length. np.interp needs strictly
+    # increasing knots, so the zero-length segments go first.
+    keep = np.concatenate([[True], seg > 0])
+    coords = np.column_stack(
+        [np.interp(distance, knots[keep], pts[keep, axis]) for axis in (0, 1)]
+    )
+    return coords, distance
+
+
+def _path_tangents(coords: np.ndarray) -> np.ndarray:
+    """Unit tangent ``(dy, dx)`` at each sample of a resampled path."""
+    tangent = np.gradient(coords, axis=0)
+    norm = np.hypot(tangent[:, 0], tangent[:, 1])
+    norm[norm == 0] = 1.0
+    return tangent / norm[:, None]
+
+
+def _sample_bilinear(stack: np.ndarray, coords: np.ndarray) -> np.ndarray:
+    """Bilinearly sample every frame of a ``[T, Y, X]`` stack at ``coords`` → ``[T, n]``.
+
+    Sampling positions are the same in every frame, so the four neighbour weights
+    are computed once and applied to the whole stack at once. Coordinates are
+    clamped to the frame, so a path (or the width around it) running off the edge
+    reads the nearest border pixel instead of failing.
+    """
+    _T, Y, X = stack.shape
+    y = np.clip(coords[:, 0], 0, Y - 1)
+    x = np.clip(coords[:, 1], 0, X - 1)
+    y0 = np.floor(y).astype(int)
+    x0 = np.floor(x).astype(int)
+    y1 = np.minimum(y0 + 1, Y - 1)
+    x1 = np.minimum(x0 + 1, X - 1)
+    fy = (y - y0)[None, :]
+    fx = (x - x0)[None, :]
+    return ((stack[:, y0, x0] * (1 - fy) + stack[:, y1, x0] * fy) * (1 - fx)
+            + (stack[:, y0, x1] * (1 - fy) + stack[:, y1, x1] * fy) * fx)
+
+
+def kymograph(
+    stack: np.ndarray,
+    path,
+    width: int = 1,
+    step: float = 1.0,
+    baseline: tuple[int, int] | None = None,
+) -> dict:
+    """Intensity along a polyline ``path`` over time — a distance × time image.
+
+    Samples the ``[T, Y, X]`` ``stack`` every ``step`` pixels along the path
+    (bilinearly, so the path needn't follow pixel centres) and stacks those
+    per-position temporal traces into ``values`` ``[n_positions, T]``: one row per
+    point along the path, one column per frame. That is the kymograph — a response
+    travelling along the path draws a diagonal band whose slope is its speed,
+    without ROIs having been placed on the path at all.
+
+    path: ``(y, x)`` vertices in the stack's pixel coordinates (at least 2).
+    width: average this many samples *across* the path (perpendicular to it,
+        centred on it) into each row, trading spatial detail for SNR; ``1`` reads
+        the line itself.
+    step: spacing of the samples along the path, in pixels.
+    baseline: ``[start, end)`` frame window turning every row into ΔF/F against
+        its own mean over that window. Rows differ enormously in raw brightness
+        along a leaf, so this is what makes a dim region's response visible next
+        to bright tissue; ``None`` keeps raw intensity. Rows whose baseline is 0
+        come back flat rather than inf/NaN.
+
+    Returns a dict with ``values``, the per-row ``distance`` along the path (px),
+    the sampled ``coords`` ``[n, 2]`` ``(y, x)``, and the ``path`` / ``width`` /
+    ``step`` / ``baseline`` it was measured with.
+    """
+    stack = np.asarray(stack, dtype=float)
+    if stack.ndim != 3:
+        raise ValueError(f"stack must be [T, Y, X]; got shape {stack.shape}")
+
+    coords, distance = resample_path(path, step=step)
+    w = max(1, int(width))
+    if w == 1:
+        values = _sample_bilinear(stack, coords).T
+    else:
+        tangent = _path_tangents(coords)
+        normal = np.column_stack([tangent[:, 1], -tangent[:, 0]])   # rotate 90°
+        offsets = np.arange(w, dtype=float) - (w - 1) / 2.0         # centred on the path
+        summed = sum(_sample_bilinear(stack, coords + off * normal) for off in offsets)
+        values = (summed / w).T
+
+    if baseline is not None:
+        window = values[:, slice(*baseline)]
+        if window.shape[1] == 0:
+            raise ValueError(f"baseline window {tuple(baseline)} selects no frames")
+        f0 = window.mean(axis=1, keepdims=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            values = np.where(f0 != 0, (values - f0) / f0, 0.0)
+
+    return {
+        "values": values,
+        "distance": distance,
+        "coords": coords,
+        "path": [(float(y), float(x)) for y, x in path],
+        "width": w,
+        "step": float(step),
+        "baseline": None if baseline is None else tuple(baseline),
+    }
 
 
 def roi_line_axis(coords: np.ndarray) -> np.ndarray | None:

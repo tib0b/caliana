@@ -36,7 +36,7 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         self.setWindowTitle("Caliana — Import & Preview")
         self.resize(1000, 560)
         self._build_ui()
-        self._load_session()
+        self.reload()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -85,6 +85,9 @@ class ImportPreviewWidget(QtWidgets.QWidget):
 
         self.frame_label = QtWidgets.QLabel("frame 0")
         controls.addWidget(self.frame_label)
+        # Connected once here, not in reload(): the ImageView outlives every
+        # reload, so re-connecting there would stack duplicate slots.
+        self.movie.sigTimeChanged.connect(self._on_time_changed)
         controls.addStretch(1)
         self.status = QtWidgets.QLabel("")
         controls.addWidget(self.status)
@@ -99,9 +102,18 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         return box
 
     # --------------------------------------------------------------- data
-    def _load_session(self):
+    def reload(self):
+        """Re-read the Session and redraw. Safe to call any number of times.
+
+        The app calls this when the Import tab is activated after the stack
+        changed (a file opened, or re-imported at another downsampling); in a
+        notebook it runs once, from ``__init__``.
+        """
+        self.play_btn.setChecked(False)          # a stale stack must stop playing
         if self.session.data is None:
             self.movie.setImage(np.zeros((1, 1, 1)))
+            self.heatmap.setImage(np.zeros((1, 1)))
+            self.status.setText("No data loaded.")
             return
         stack = np.asarray(self.session._working_stack())
         # axes maps stack dims -> ImageView roles (row-major: 1=y, 2=x). Contrast
@@ -111,10 +123,10 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         # dragged wider.
         self.movie.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
                             autoLevels=False, levels=figures.intensity_levels(stack))
-        self.movie.sigTimeChanged.connect(self._on_time_changed)
         mip = self.session.max_projection()
         self.heatmap.setImage(mip, autoLevels=False,
                               levels=figures.intensity_levels(mip))
+        self.status.setText("")
 
     # ------------------------------------------------------------- saving
     def _save_heatmap(self):

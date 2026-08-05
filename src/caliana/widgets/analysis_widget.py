@@ -30,9 +30,17 @@ run on every pixel's temporal trace (optionally after n×n binning), colouring
 each pixel by when it first responds. Method / frac / k / d / baseline mirror the
 propagation controls, so a heatmap pixel and a same-parameter ROI onset agree.
 
+**Kymograph** — click along a feature (a vein, a petiole) to trace a path, then
+read the intensity along it over time as a distance × time image
+(`analysis.kymograph`). No ROIs are involved: a response travelling along the
+path draws a diagonal band whose slope is its speed, which is the continuous
+counterpart of the per-ROI propagation fit. Values default to per-position ΔF/F,
+since raw brightness varies far more along a leaf than the response does.
+
 Interaction logic lives in plain methods (`compute_dff`, `smooth_traces`,
-`compute_propagation`, `compute_onset_heatmap`, `add_event`, `_redraw_traces`) so
-tests can drive it without a mouse.
+`compute_propagation`, `compute_onset_heatmap`, `add_path_point`, `finish_path`,
+`compute_kymograph`, `add_event`, `_redraw_traces`) so tests can drive it without
+a mouse.
 """
 from __future__ import annotations
 
@@ -44,10 +52,15 @@ import pyqtgraph as pg
 from .. import figures
 from ..models import BaselineMethod
 from ..space import distance_units, speed_units
-from ._plot import FrameTimeAxis, frame_interval, pixel_size
+from ._plot import FrameTimeAxis, frame_interval, pixel_size, polyline_vertices
 from ._qt import get_qt, save_figure_dialog
 
 QtCore, QtGui, QtWidgets = get_qt()
+
+pg.setConfigOption("imageAxisOrder", "row-major")
+
+_LEFT = QtCore.Qt.MouseButton.LeftButton
+_PATH_PEN = pg.mkPen("#00ff7f", width=2)
 
 # Propagation direction modes: combo label -> analysis.cross_roi_propagation name.
 # Insertion order is the combo order, so the first entry is the default.
@@ -55,6 +68,12 @@ _DIRECTION_MODES = {
     "along ROI line": "roi_line",
     "automatic (2D fit)": "auto",
 }
+
+# Kymograph value modes. ΔF/F leads (and is the default) because raw brightness
+# varies far more from one end of a leaf to the other than a response does, so a
+# raw kymograph mostly draws the tissue rather than the signal.
+_KYMO_DFF = "ΔF/F"
+_KYMO_RAW = "raw intensity"
 
 
 class _Displayed(NamedTuple):
@@ -80,8 +99,18 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._onset_lines: list = []
         self._prop_fit: dict | None = None   # snapshot of the last propagation scatter
 
+        # Kymograph page: the path being clicked out, its committed graphic, and
+        # the last computed result (kept for the figure export).
+        self._path_points: list[tuple[float, float]] = []
+        self._path_preview = None
+        self._path_item = None
+        self._kymo_result: dict | None = None
+        # Frame size path clicks are bounds-checked against; a placeholder until a
+        # stack is loaded, so clicking an empty widget adds nothing.
+        self._kymo_shape_yx = (1, 1)
+
         self._build_ui()
-        self._load_session()
+        self.reload()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -90,6 +119,7 @@ class AnalysisWidget(QtWidgets.QWidget):
         outer.addWidget(self.tabs, stretch=1)
         self.tabs.addTab(self._build_traces_page(), "Trace analysis")
         self.tabs.addTab(self._build_heatmap_page(), "Heatmaps")
+        self.tabs.addTab(self._build_kymograph_page(), "Kymograph")
 
         # A single status line shared by both pages.
         self.status = QtWidgets.QLabel("")
@@ -331,6 +361,109 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._on_hm_method_changed(self.hm_method_box.currentText())
         return page
 
+    # ----------------------------------------------------- kymograph page
+    def _build_kymograph_page(self) -> "QtWidgets.QWidget":
+        """Trace a path on the stack, read the intensity along it over time.
+
+        The movie (left) is where the path is drawn — scrub to a frame where the
+        response is visible, click along the feature to follow, and the sampled
+        line commits to a draggable, editable polyline. The kymograph (right) is
+        ``session.kymograph`` rendered as a distance × time image with a
+        draggable-level colour bar, mirroring the heatmap page.
+        """
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+
+        row = QtWidgets.QHBoxLayout()
+        self.path_btn = QtWidgets.QPushButton("Draw path")
+        self.path_btn.setCheckable(True)
+        self.path_btn.setToolTip(
+            "Click points along the feature to follow; click again (or double-click "
+            "the image) to finish. The finished path can be dragged and reshaped."
+        )
+        self.path_btn.toggled.connect(self._on_path_toggled)
+        row.addWidget(self.path_btn)
+
+        self.path_clear_btn = QtWidgets.QPushButton("Clear path")
+        # Through a lambda: `clicked` carries a checked flag that would land on
+        # keep_mode and leave the draw button stuck down.
+        self.path_clear_btn.clicked.connect(lambda: self.clear_path())
+        row.addWidget(self.path_clear_btn)
+
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("Width (px):"))
+        self.kymo_width_box = QtWidgets.QSpinBox()
+        self.kymo_width_box.setRange(1, 199)
+        self.kymo_width_box.setValue(1)
+        self.kymo_width_box.setToolTip(
+            "Average this many samples across the path (perpendicular to it) into "
+            "each row — more width, less noise, coarser detail"
+        )
+        row.addWidget(self.kymo_width_box)
+
+        row.addSpacing(16)
+        row.addWidget(QtWidgets.QLabel("Values:"))
+        self.kymo_signal_box = QtWidgets.QComboBox()
+        self.kymo_signal_box.addItems([_KYMO_DFF, _KYMO_RAW])   # ΔF/F first = default
+        self.kymo_signal_box.setToolTip(
+            "ΔF/F normalises each position against its own baseline, so a dim "
+            "region's response reads as strongly as a bright one's"
+        )
+        self.kymo_signal_box.currentTextChanged.connect(self._on_kymo_signal_changed)
+        row.addWidget(self.kymo_signal_box)
+
+        self.kymo_base_label = QtWidgets.QLabel("baseline N:")
+        row.addWidget(self.kymo_base_label)
+        self.kymo_base_box = QtWidgets.QSpinBox()
+        self.kymo_base_box.setRange(1, 100000)
+        self.kymo_base_box.setValue(10)
+        self.kymo_base_box.setToolTip("F0 = mean of the first N frames, per path position")
+        row.addWidget(self.kymo_base_box)
+
+        self.kymo_btn = QtWidgets.QPushButton("Compute kymograph")
+        self.kymo_btn.clicked.connect(self.compute_kymograph)
+        row.addWidget(self.kymo_btn)
+
+        self.save_kymo_btn = QtWidgets.QPushButton("Save kymograph…")
+        self.save_kymo_btn.setToolTip("Save the distance-vs-time image as shown")
+        self.save_kymo_btn.clicked.connect(self._save_kymograph)
+        row.addWidget(self.save_kymo_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        v.addWidget(split, stretch=1)
+
+        # Left: the movie the path is drawn on (scrubbable, same contrast as the
+        # ROI/import views so the tissue looks identical whichever tab you're on).
+        self.kymo_movie = pg.ImageView(name="kymograph_image")
+        self.kymo_movie.ui.roiBtn.hide()
+        self.kymo_movie.ui.menuBtn.hide()
+        self.kymo_movie.ui.histogram.gradient.hide()
+        split.addWidget(self.kymo_movie)
+
+        # Right: the kymograph. Distance runs up the y-axis from the path's start,
+        # time along x — both in the session's units, set in _show_kymograph.
+        self._kymo_cmap = pg.colormap.get("inferno")
+        self.kymo_view = pg.GraphicsLayoutWidget()
+        self.kymo_plot = self.kymo_view.addPlot()
+        self.kymo_plot.setLabel("bottom", "frame")
+        self.kymo_plot.setLabel("left", "distance along path (px)")
+        self.kymo_plot.getViewBox().setDefaultPadding(0.02)
+        self.kymo_image = pg.ImageItem()
+        self.kymo_image.setOpts(axisOrder="row-major")   # data is [position, frame]
+        self.kymo_plot.addItem(self.kymo_image)
+        self.kymo_cbar = pg.ColorBarItem(colorMap=self._kymo_cmap, interactive=True,
+                                         label="ΔF/F")
+        self.kymo_cbar.setImageItem(self.kymo_image)
+        self.kymo_view.addItem(self.kymo_cbar)
+        split.addWidget(self.kymo_view)
+        split.setSizes([520, 540])
+
+        self.kymo_movie.view.scene().sigMouseClicked.connect(self._on_kymo_click)
+        self._on_kymo_signal_changed(self.kymo_signal_box.currentText())
+        return page
+
     # ------------------------------------------------------- analysis panels
     def _build_prop_panel(self) -> "QtWidgets.QWidget":
         panel = QtWidgets.QWidget()
@@ -400,7 +533,21 @@ class AnalysisWidget(QtWidgets.QWidget):
         self._on_onset_method_changed(self.onset_method_box.currentText())
         return panel
 
-    def _load_session(self):
+    def reload(self):
+        """Re-read the Session and redraw. Safe to call any number of times.
+
+        The app calls this when the Analysis tab is activated after anything
+        upstream changed — ROIs added, registration re-run, a crop applied — all
+        of which invalidate the traces this page analyses. Overlays from a
+        previous session state (onset markers, event lines, the propagation
+        graph, the kymograph path) are cleared, then rebuilt from what the
+        session actually holds.
+        """
+        self._clear_onsets()
+        self._clear_event_lines()
+        self.prop_plot.clear()
+        self._prop_fit = None
+        self.results.setPlainText("")
         if self.session.data is not None and self.session.rois:
             self.session.extract_traces()
             T = self.session.traces.raw.shape[1]
@@ -413,25 +560,65 @@ class AnalysisWidget(QtWidgets.QWidget):
             # Onset baseline defaults to the same leading window; clamp it in-bounds.
             self.prop_region.setBounds((start, start + T))
             self.prop_region.setRegion((start, start + min(self.n_box.value(), T)))
+            self.status.setText("")
+        else:
+            self.status.setText("Load a stack and place ROIs first.")
         if self.session.data is not None:
             # Heatmap baseline window: same leading frames as the trace baselines,
             # in original-frame coordinates, clamped to the (possibly cropped) span.
             start = self._crop_start()
-            if self.session.crop_window is not None:
-                nframes = self.session.crop_window[1] - self.session.crop_window[0]
-            else:
-                nframes = len(self.session._working_stack())
+            nframes = self._n_frames()
             self.hm_base_start.setRange(start, start + max(0, nframes - 1))
             self.hm_base_end.setRange(start, start + nframes)
             self.hm_base_start.setValue(start)
             self.hm_base_end.setValue(start + min(self.n_box.value(), nframes))
-        # Reflect calibration set in the notebook or read from the file metadata.
-        tl = self.session.timeline
-        if tl is not None and tl.frame_interval:
-            self.interval_box.setValue(tl.frame_interval)
-        if self.session.space.pixel_size:
-            self.pixel_box.setValue(self.session.space.pixel_size)
+        # Mirror the calibration the session carries (file metadata, the notebook,
+        # or the Import tab). Signals are blocked so reflecting it here can't write
+        # a stale box value back onto the session; the axes are refreshed below.
+        self._sync_calibration_boxes()
+        self._reload_kymograph()
+        # Event markers already on the timeline get their draggable line back.
+        for ev in (self.session.timeline.events if self.session.timeline else []):
+            self._draw_event_line(ev)
         self._redraw_traces()
+
+    def _reload_kymograph(self):
+        """Re-point the kymograph page at the current stack, dropping the old path.
+
+        A path is a list of pixel coordinates on the stack it was drawn over, so a
+        new (or re-imported, or re-registered) stack invalidates it exactly as it
+        invalidates ROIs — the same reason ``Session._reset_derived`` drops those.
+        """
+        self.clear_path()
+        self.kymo_image.clear()
+        self._kymo_result = None
+        if self.session.data is None:
+            self._kymo_shape_yx = (1, 1)
+            self.kymo_movie.setImage(np.zeros((1, 1, 1)))
+            return
+        stack = np.asarray(self.session._working_stack())
+        self._kymo_shape_yx = stack.shape[1:]
+        self.kymo_movie.setImage(stack, axes={"t": 0, "y": 1, "x": 2},
+                                 autoLevels=False,
+                                 levels=figures.intensity_levels(stack))
+        self.kymo_base_box.setMaximum(self._n_frames())
+
+    def _sync_calibration_boxes(self):
+        """Point the frame-interval / pixel-size boxes at the session's values.
+
+        0 is each box's "uncalibrated" special value, so a session with no scale
+        reads back as ``frames`` / ``pixels`` rather than keeping whatever the
+        previous session was calibrated at.
+        """
+        tl = self.session.timeline
+        interval = tl.frame_interval if tl is not None else None
+        for box, value in ((self.interval_box, interval),
+                           (self.pixel_box, self.session.space.pixel_size)):
+            blocker = QtCore.QSignalBlocker(box)
+            box.setValue(value or 0.0)
+            del blocker
+        self._time_axis.set_frame_interval(interval or None)
+        self.plot.setLabel("bottom", "time (s)" if interval else "frame")
 
     # ------------------------------------------------------------- helpers
     def _displayed(self) -> _Displayed:
@@ -499,6 +686,18 @@ class AnalysisWidget(QtWidgets.QWidget):
         cw = self.session.crop_window
         return cw[0] if cw is not None else 0
 
+    def _n_frames(self) -> int:
+        """How many frames the analyses see: the crop window's, else the stack's.
+
+        The companion of ``_crop_start`` — together they are the ``[start, end)``
+        span ``Session._crop_bounds`` hands every analysis, which is what the
+        baseline-window controls have to stay inside.
+        """
+        cw = self.session.crop_window
+        if cw is not None:
+            return cw[1] - cw[0]
+        return len(self.session._working_stack()) if self.session.data is not None else 0
+
     # ------------------------------------------------------------- actions
     def compute_dff(self):
         if self.session.traces is None:
@@ -529,16 +728,27 @@ class AnalysisWidget(QtWidgets.QWidget):
 
     def add_event(self, frame: int):
         ev = self.session.timeline.add_event(int(frame))
-        line = pg.InfiniteLine(pos=ev.frame, angle=90, movable=True,
-                               pen=pg.mkPen("#ff5050", width=2))
-        line.sigPositionChanged.connect(lambda ln, e=ev: setattr(e, "frame", int(ln.value())))
-        self.plot.addItem(line)
-        self._event_lines.append((ev, line))
+        self._draw_event_line(ev)
         if self._frame_interval():
             self.status.setText(f"Event added at {self._to_time(ev.frame):.4g} s.")
         else:
             self.status.setText(f"Event added at frame {ev.frame}.")
         return ev
+
+    def _draw_event_line(self, ev):
+        """Draggable marker for a timeline event; dragging writes its new frame back."""
+        line = pg.InfiniteLine(pos=ev.frame, angle=90, movable=True,
+                               pen=pg.mkPen("#ff5050", width=2))
+        line.sigPositionChanged.connect(lambda ln, e=ev: setattr(e, "frame", int(ln.value())))
+        self.plot.addItem(line)
+        self._event_lines.append((ev, line))
+        return line
+
+    def _clear_event_lines(self):
+        """Remove every event marker from the plot; the Timeline keeps the events."""
+        for _ev, line in self._event_lines:
+            self.plot.removeItem(line)
+        self._event_lines.clear()
 
     def compute_propagation(self):
         if not self.session.rois:
@@ -609,6 +819,161 @@ class AnalysisWidget(QtWidgets.QWidget):
         self.status.setText(
             f"Onset heatmap: {int(finite.sum())}/{disp.size} pixels responded."
         )
+
+    # ------------------------------------------------------ kymograph path
+    def _on_path_toggled(self, checked: bool):
+        """Enter path-drawing on check; commit (or discard) the outline on uncheck."""
+        if checked:
+            self.start_path()
+        elif len(self._path_points) >= 2:
+            self._commit_path()
+        else:
+            self._clear_path_preview()
+            self.status.setText("A path needs at least two points; nothing kept.")
+
+    def start_path(self):
+        """Begin a new path, replacing whichever one is on the image."""
+        self.clear_path(keep_mode=True)
+        self._path_preview = pg.PlotDataItem(
+            pen=_PATH_PEN, symbol="o", symbolSize=6, symbolBrush="#00ff7f"
+        )
+        self.kymo_movie.view.addItem(self._path_preview)
+        self.status.setText("Click along the feature to follow; click ‘Draw path’ to finish.")
+
+    def add_path_point(self, row: float, col: float):
+        """Append a point to the path being drawn and redraw its preview."""
+        self._path_points.append((row, col))
+        if self._path_preview is not None:
+            ys = [p[0] for p in self._path_points]
+            xs = [p[1] for p in self._path_points]
+            self._path_preview.setData(xs, ys)
+
+    def finish_path(self):
+        """Commit the path being drawn (needs >= 2 points)."""
+        # Unchecking the button routes through _on_path_toggled -> _commit_path.
+        self.path_btn.setChecked(False)
+
+    def _commit_path(self):
+        """Turn the clicked points into a draggable, reshapeable open polyline."""
+        points = list(self._path_points)
+        self._clear_path_preview()
+        self._path_item = pg.PolyLineROI([(x, y) for (y, x) in points], closed=False,
+                                         pen=_PATH_PEN, movable=True)
+        self.kymo_movie.view.addItem(self._path_item)
+        self.status.setText(f"Path of {len(points)} points — drag it to adjust, then compute.")
+        return self._path_item
+
+    def clear_path(self, keep_mode: bool = False):
+        """Remove the path (drawn or in progress) from the image.
+
+        ``keep_mode`` leaves the draw button as it is; without it the button is
+        released, and silently — its ``toggled`` handler would otherwise commit
+        the very points this is discarding.
+        """
+        if not keep_mode and self.path_btn.isChecked():
+            blocker = QtCore.QSignalBlocker(self.path_btn)
+            self.path_btn.setChecked(False)
+            del blocker
+        self._clear_path_preview()
+        if self._path_item is not None:
+            self.kymo_movie.view.removeItem(self._path_item)
+            self._path_item = None
+
+    def _clear_path_preview(self):
+        if self._path_preview is not None:
+            self.kymo_movie.view.removeItem(self._path_preview)
+            self._path_preview = None
+        self._path_points = []
+
+    def path_points(self) -> list:
+        """The path as ``(y, x)`` points: the committed polyline, else the live one.
+
+        Read from the graphic rather than from what was clicked, so dragging or
+        reshaping the polyline moves the kymograph with it.
+        """
+        if self._path_item is not None:
+            return polyline_vertices(self._path_item)
+        return list(self._path_points)
+
+    def _on_kymo_click(self, ev):
+        """Left clicks add path points while drawing; a double-click finishes."""
+        if ev.button() != _LEFT or not self.path_btn.isChecked():
+            return
+        p = self.kymo_movie.view.mapSceneToView(ev.scenePos())
+        row, col = p.y(), p.x()
+        if ev.double():
+            self.finish_path()
+            return
+        height, width = self._kymo_shape_yx
+        if 0 <= row < height and 0 <= col < width:
+            self.add_path_point(row, col)
+
+    # -------------------------------------------------------- kymograph
+    def compute_kymograph(self):
+        """Sample the stack along the drawn path and show the distance × time image."""
+        if self.session.data is None:
+            self.status.setText("No data loaded.")
+            return None
+        points = self.path_points()
+        if len(points) < 2:
+            self.status.setText(
+                "Draw a path first: click ‘Draw path’, click along the feature, "
+                "then click it again."
+            )
+            return None
+        dff = self.kymo_signal_box.currentText() == _KYMO_DFF
+        # Baseline frames are trace-column (post-crop) indices, like every other
+        # first-N baseline on this widget.
+        baseline = (0, self.kymo_base_box.value()) if dff else None
+        try:
+            result = self.session.kymograph(
+                points, width=self.kymo_width_box.value(), baseline=baseline,
+            )
+        except ValueError as exc:          # degenerate path / empty baseline window
+            self.status.setText(str(exc))
+            return None
+        self._kymo_result = result
+        self._show_kymograph(result)
+        return result
+
+    def _show_kymograph(self, result):
+        """Draw a kymograph in the session's own units.
+
+        The image is placed in data coordinates — x from the crop start in frames
+        or seconds, y the arc length along the path in pixels or µm — so reading a
+        band's slope off the axes gives the propagation speed in the same units
+        the propagation summary reports.
+        """
+        values = np.asarray(result["values"], dtype=float)
+        iv = self._frame_interval()
+        scale = iv or 1.0
+        dfactor, dunit = self._distance_units()
+        length = float(result["distance"][-1]) * dfactor
+        self.kymo_image.setImage(values, autoLevels=False)
+        self.kymo_image.setRect(QtCore.QRectF(
+            self._crop_start() * scale, 0.0, values.shape[1] * scale, length or 1.0
+        ))
+
+        lo, hi = float(np.nanmin(values)), float(np.nanmax(values))
+        if hi <= lo:
+            hi = lo + 1.0
+        # Fine, unit-agnostic drag steps for the interactive level handles, as on
+        # the heatmap page: ~200 steps across the data span.
+        self.kymo_cbar.rounding = max((hi - lo) / 200.0, 1e-9)
+        self.kymo_cbar.setLevels((lo, hi))
+        self.kymo_cbar.setLabel("left", self.kymo_signal_box.currentText())
+        self.kymo_plot.setLabel("bottom", "time (s)" if iv else "frame")
+        self.kymo_plot.setLabel("left", f"distance along path ({dunit})")
+        self.kymo_plot.getViewBox().autoRange(padding=0.02)
+        self.status.setText(
+            f"Kymograph: {values.shape[0]} positions over {length:.4g} {dunit}"
+            f" × {values.shape[1]} frames."
+        )
+
+    def _on_kymo_signal_changed(self, text: str):
+        """The baseline count only means anything for the ΔF/F kymograph."""
+        for w in (self.kymo_base_label, self.kymo_base_box):
+            w.setEnabled(text == _KYMO_DFF)
 
     def _overlay_onsets(self, onsets):
         self._clear_onsets()
@@ -831,6 +1196,30 @@ class AnalysisWidget(QtWidgets.QWidget):
         save_figure_dialog(self, render, title="Save propagation figure",
                            status=self.status)
 
+    def _save_kymograph(self):
+        """Export the kymograph as shown (WYSIWYG): same axes, units and contrast."""
+        result = self._kymo_result
+        if result is None:
+            self.status.setText("Compute a kymograph first.")
+            return
+        values = np.asarray(result["values"], dtype=float)
+        scale = self._frame_interval() or 1.0
+        dfactor, dunit = self._distance_units()
+        x0 = self._crop_start() * scale
+        extent = (x0, x0 + values.shape[1] * scale,
+                  0.0, float(result["distance"][-1]) * dfactor)
+        signal = self.kymo_signal_box.currentText()
+
+        def render(path):
+            return figures.export_kymograph(
+                values, extent=extent,
+                xlabel="time (s)" if self._frame_interval() else "frame",
+                ylabel=f"distance along path ({dunit})", cbar_label=signal,
+                levels=self.kymo_cbar.levels(), save=path,
+            )
+
+        save_figure_dialog(self, render, title="Save kymograph", status=self.status)
+
     def closeEvent(self, event):
         self.result = self.session.analyses
         self.closed.emit()
@@ -845,10 +1234,12 @@ class AnalysisWidget(QtWidgets.QWidget):
         """
         interval = value or None
         if self.session.timeline is not None:
-            self.session.timeline.frame_interval = interval
+            # Through the setter, so the change is announced to the other panels
+            # showing this calibration (the app's Import tab).
+            self.session.set_frame_interval(interval)
         self._time_axis.set_frame_interval(interval)
         self.plot.setLabel("bottom", "time (s)" if interval else "frame")
-        self._refresh_propagation_units()
+        self._refresh_units()
 
     def _on_pixel_size_changed(self, value: float):
         """Switch distance readouts between pixels and µm. SPEC §3 space axis.
@@ -857,22 +1248,27 @@ class AnalysisWidget(QtWidgets.QWidget):
         pixels (nothing on screen moves), and the value goes to the session's
         SpatialScale so the notebook, provenance and saved figures agree.
         """
-        self.session.space.pixel_size = value or None
-        self._refresh_propagation_units()
+        if self.session.data is not None:
+            self.session.set_pixel_size(value or None)   # announces to other panels
+        else:
+            self.session.space.pixel_size = value or None
+        self._refresh_units()
 
-    def _refresh_propagation_units(self):
-        """Redraw an existing propagation result after a calibration change.
+    def _refresh_units(self):
+        """Redraw existing results after a calibration change.
 
-        Its speed, graph axes and onset times are all reported in calibrated
-        units, so they would otherwise keep the units they were computed under.
-        The result itself (px/frame, frame onsets) is unchanged — only its
-        presentation.
+        The propagation speed, its graph axes and onset times — and the
+        kymograph's two axes — are all *reported* in calibrated units, so they
+        would otherwise keep the units they were computed under. The results
+        themselves (px/frame, frame onsets, sampled intensities) are unchanged;
+        only their presentation is.
         """
         prop = self.session.analyses.get("propagation")
-        if prop is None or self.session.traces is None:
-            return
-        self._plot_propagation_fit(prop)
-        self._write_propagation_summary(prop)
+        if prop is not None and self.session.traces is not None:
+            self._plot_propagation_fit(prop)
+            self._write_propagation_summary(prop)
+        if self._kymo_result is not None:
+            self._show_kymograph(self._kymo_result)
 
     def _on_baseline_changed(self, _text):
         self.n_box.setEnabled(BaselineMethod(self.baseline_box.currentText()) == BaselineMethod.FIRST_N)

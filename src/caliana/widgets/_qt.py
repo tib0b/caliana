@@ -71,17 +71,25 @@ def save_figure_dialog(parent, render, *, title="Save figure", status=None):
     return path
 
 
-def run_widget_blocking(factory):
+def run_widget_blocking(factory, close_on: str | None = None):
     """Open a widget, block until it closes, and return its ``.result``. SPEC §2.2.
 
     ``factory`` builds and returns a QWidget that exposes a ``result`` attribute
     and (ideally) a ``closed`` signal. The widget should set ``self.result``
     before closing.
+
+    ``close_on`` names a signal whose emission means "this step is done" (e.g.
+    ``"applied"`` on the crop widget) and closes the window. Panels in the app
+    stay open and just refresh on that same signal, so the widgets themselves
+    never call ``close()`` — one notebook step, one window, is a property of this
+    wrapper rather than of the widget.
     """
     QtCore, _QtGui, _QtWidgets = get_qt()
     _app, _created = ensure_app()
 
     widget = factory()
+    if close_on is not None:
+        getattr(widget, close_on).connect(widget.close)
     widget.show()
 
     # Block this call until the window closes (notebook %gui qt or script alike).

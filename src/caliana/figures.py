@@ -283,6 +283,38 @@ def export_traces(traces, *, x=None, xlabel="frame", ylabel="", labels=None,
     return _finish(fig, save, dpi)
 
 
+def export_kymograph(values, *, extent, xlabel="frame", ylabel="distance along path (px)",
+                     cbar_label="", cmap="inferno", levels=None, title=None,
+                     width=COL_SINGLE, height=None, save=None, dpi=600):
+    """Clean render of a kymograph: distance along a path (y) against time (x).
+
+    values: the ``[n_positions, T]`` array ``analysis.kymograph`` returns. extent:
+        ``(x0, x1, y0, y1)`` in the units the axes are labelled in (frames or
+        seconds, px or µm), so the image carries the recording's own coordinates.
+    levels: ``(vmin, vmax)`` contrast pair (e.g. the live view's colour-bar
+        levels); ``None`` autoscales. Drawn with ``origin="lower"``, so distance
+        grows upward as in the interactive view.
+    """
+    import matplotlib.pyplot as plt
+
+    values = np.asarray(values, dtype=float)
+    lo, hi = levels if levels is not None else (None, None)
+    with paper_style():
+        h = height if height is not None else width * 0.75
+        fig, ax = plt.subplots(figsize=(width, h))
+        im = ax.imshow(values, cmap=cmap, origin="lower", aspect="auto",
+                       extent=extent, vmin=lo, vmax=hi, interpolation="nearest")
+        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cb.set_label(cbar_label)
+        cb.outline.set_linewidth(0.6)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if title:
+            ax.set_title(title)
+        fig.tight_layout()
+    return _finish(fig, save, dpi)
+
+
 def export_scatter(x, y, *, xlabel, ylabel, point_labels=None, fit=None,
                    title=None, width=COL_SINGLE, height=None, save=None, dpi=600):
     """Clean render of the propagation distance-vs-onset-delay scatter.

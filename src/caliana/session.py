@@ -10,7 +10,7 @@ Typical order: ``load`` → ``add_leaf_region`` / ``register`` → ``add_roi`` �
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import numpy as np
 
@@ -31,7 +31,7 @@ from .space import SpatialScale
 from .timeline import Timeline
 
 
-def _downsampled_scale(native: Optional[float], step: int) -> Optional[float]:
+def _downsampled_scale(native: float | None, step: int) -> float | None:
     """A file's native scale expressed per *loaded* sample.
 
     Downsampling by ``step`` makes each kept frame/pixel span ``step`` times as
@@ -44,9 +44,9 @@ def _downsampled_scale(native: Optional[float], step: int) -> Optional[float]:
 class Session:
     def __init__(self) -> None:
         self.source = None                              # SourceInfo
-        self.data: Optional[np.ndarray] = None          # [T, Y, X] raw downsampled
-        self.registered_data: Optional[np.ndarray] = None  # stabilized stack; None until register(apply=True)
-        self.timeline: Optional[Timeline] = None
+        self.data: np.ndarray | None = None          # [T, Y, X] raw downsampled
+        self.registered_data: np.ndarray | None = None  # stabilized stack; None until register(apply=True)
+        self.timeline: Timeline | None = None
         # Space axis, the counterpart of `timeline`: µm/px of the loaded stack,
         # uncalibrated until `load` reads it from the file or `set_pixel_size` sets it.
         self.space = SpatialScale()
@@ -59,13 +59,18 @@ class Session:
         self.rois: list[ROI] = []
         # [start, end) frame window traces are cropped to before analysis; None =>
         # the whole recording. In original (uncropped) frame indices.
-        self.crop_window: Optional[tuple[int, int]] = None
-        self.traces: Optional[Traces] = None
+        self.crop_window: tuple[int, int] | None = None
+        self.traces: Traces | None = None
         self.analyses: dict = {}
+        # Monotonic change counter (see `_bump`). Panels in the standalone app
+        # cache the value they last read and re-read the session when it moves,
+        # so a change made on one tab shows up on the next with no cross-widget
+        # wiring. Notebook use ignores it.
+        self._revision: int = 0
 
     # ----------------------------------------------------------------- Stage I
     @classmethod
-    def from_file(cls, path, **import_kwargs) -> "Session":
+    def from_file(cls, path, **import_kwargs) -> Session:
         """New Session with ``path`` (``.tif``/``.tiff``/``.nd2``) loaded.
 
         Shorthand for ``Session().load(...)``, and the normal entry point.
@@ -116,16 +121,20 @@ class Session:
         """
         return cls().load(path, **import_kwargs)
 
-    def load(self, path, **import_kwargs) -> "Session":
+    def load(self, path, **import_kwargs) -> Session:
         """Load a ``.tif``/``.tiff``/``.nd2`` stack, applying downsample-on-load.
 
         ``import_kwargs`` are ``ImportParams`` fields (``start``, ``end``,
         ``temporal_step``, ``spatial_step``, ``spatial_window``, ``channel``);
         see ``from_file`` for what each one does. Loading resets the time and
-        space axes to whatever the file declares.
+        space axes to whatever the file declares, and drops everything derived
+        from the previous stack (see ``_reset_derived``) — re-importing the same
+        file at a different ``spatial_step`` therefore starts from a clean slate,
+        which is the point of the app's Import tab.
         """
         params = ImportParams(**import_kwargs)
         self.data, self.source = io.load_stack(path, params)
+        self._reset_derived()
         # Calibrate both axes from the file's metadata where available. The stack
         # is downsampled, so a kept frame/pixel spans `*_step` native ones.
         scale = self.source.scale
@@ -136,6 +145,7 @@ class Session:
         self.space = SpatialScale(
             pixel_size=_downsampled_scale(scale.pixel_size, params.spatial_step)
         )
+        self._bump()
         return self
 
     def preview(self):
@@ -157,6 +167,7 @@ class Session:
         """Register a leaf box ``bbox = (y0, y1, x0, x1)`` for per-leaf mode."""
         leaf = LeafRegion(bbox=tuple(bbox), label=label)
         self.leaf_regions.append(leaf)
+        self._bump()
         return leaf
 
     def register(
@@ -166,7 +177,7 @@ class Session:
         mask: bool = False,
         apply: bool = True,
         transformation: str = "affine",
-    ) -> "Session":
+    ) -> Session:
         """Run motion correction in the chosen mode.
 
         mode: ``RegistrationMode.NONE`` (ROIs on the raw stack), ``WHOLE_FRAME``
@@ -288,7 +299,7 @@ class Session:
         self.traces = self._extract_window(*self._crop_bounds())
         return self.traces
 
-    def _extract_window(self, start: int = 0, end: Optional[int] = None) -> Traces:
+    def _extract_window(self, start: int = 0, end: int | None = None) -> Traces:
         """Traces over frames ``[start, end)`` via the currently active path.
 
         Two extraction paths:
@@ -354,7 +365,7 @@ class Session:
             labels.append(roi.label or f"roi_{i}")
         return Traces(raw=np.stack(rows), labels=labels)
 
-    def set_crop(self, start: Optional[int], end: Optional[int]) -> Traces:
+    def set_crop(self, start: int | None, end: int | None) -> Traces:
         """Restrict traces to the ``[start, end)`` frame window, then re-extract.
 
         ``start``/``end`` are original frame indices (``None`` = open end); a window
@@ -380,10 +391,10 @@ class Session:
         from .widgets._qt import run_widget_blocking
         from .widgets.crop_widget import CropTracesWidget
 
-        return run_widget_blocking(lambda: CropTracesWidget(self))
+        return run_widget_blocking(lambda: CropTracesWidget(self), close_on="applied")
 
     # --------------------------------------------------------------- Stage III
-    def set_frame_interval(self, seconds_per_frame: Optional[float]) -> "Session":
+    def set_frame_interval(self, seconds_per_frame: float | None) -> Session:
         """Calibrate the time axis (seconds per frame); ``None`` ⇒ frames-only.
 
         Once set, the analysis plot, CSV export and static figures report seconds
@@ -392,9 +403,10 @@ class Session:
         if self.timeline is None:
             raise RuntimeError("No data loaded; call load()/from_file() first.")
         self.timeline.frame_interval = seconds_per_frame
+        self._bump()
         return self
 
-    def set_pixel_size(self, microns_per_pixel: Optional[float]) -> "Session":
+    def set_pixel_size(self, microns_per_pixel: float | None) -> Session:
         """Calibrate the space axis (µm per pixel); ``None`` ⇒ pixels-only.
 
         In *loaded* pixels, matching ROI coordinates: a stack imported with
@@ -407,6 +419,7 @@ class Session:
         """
         self._require_data()
         self.space.pixel_size = microns_per_pixel
+        self._bump()
         return self
 
     def compute_dff(self, method=BaselineMethod.FIRST_N, n=None, region=None) -> Traces:
@@ -472,6 +485,34 @@ class Session:
             stack, method=method, frac=frac, k=k, d=d,
             baseline_region=baseline_region, bin_size=bin_size,
         )
+
+    def kymograph(
+        self,
+        path,
+        width: int = 1,
+        step: float = 1.0,
+        baseline: tuple[int, int] | None = None,
+    ) -> dict:
+        """Intensity along a hand-drawn path over time; stores it under ``analyses``.
+
+        Samples the working stack along the polyline ``path`` of ``(y, x)`` pixel
+        points, honoring ``crop_window`` so it covers the same interval as the
+        traces, and returns the distance × time image (see ``analysis.kymograph``
+        for ``width``, ``step`` and ``baseline``, whose frames are trace-column,
+        post-crop indices).
+
+        The path is fixed in the stack's coordinates, so with ``track_motion``
+        (registered with ``apply=False``, where the stack stays raw and the *ROIs*
+        move) the tissue slides under it. Warp the stack — ``register(apply=True)``
+        — for a motion-corrected kymograph.
+        """
+        self._require_data()
+        start, end = self._crop_bounds()
+        stack = self._working_stack()[start:end]
+        result = analysis.kymograph(stack, path, width=width, step=step,
+                                    baseline=baseline)
+        self.analyses["kymograph"] = result
+        return result
 
     def apply(self, func: Callable):
         """Run a custom callable ``f(traces, data) -> result`` on the current traces."""
@@ -564,7 +605,7 @@ class Session:
         """The stack ROIs/heatmaps act on: stabilized if registered, else raw."""
         return self.registered_data if self.registered_data is not None else self.data
 
-    def _crop_bounds(self) -> tuple[int, Optional[int]]:
+    def _crop_bounds(self) -> tuple[int, int | None]:
         """The ``[start, end)`` frame window in play — the crop, else the whole stack.
 
         ``start`` doubles as the offset from trace columns to original frame
@@ -576,3 +617,32 @@ class Session:
         """Recomputation is explicit: upstream changes drop stale traces."""
         self.traces = None
         self.analyses.clear()
+        self._bump()
+
+    def _reset_derived(self) -> None:
+        """Drop everything derived from the stack being replaced.
+
+        ROIs, leaf boxes, registration and the crop window are all expressed in
+        the coordinates of the stack they were drawn on, so carrying them into a
+        newly loaded file (or the same file re-imported at another
+        ``spatial_step``) would silently measure the wrong pixels. Called by
+        ``load``; the axes themselves are re-read from the file there.
+        """
+        self.registered_data = None
+        self.registration = RegistrationResult()
+        self.track_motion = False
+        self.leaf_regions = []
+        self.rois = []
+        self.crop_window = None
+        self._invalidate_traces()
+
+    def _bump(self) -> None:
+        """Mark the session changed, moving ``_revision`` on.
+
+        Every mutation a panel might need to redraw for goes through here —
+        ``load``, ``add_leaf_region``, ``register``, the calibration setters, and
+        ``_invalidate_traces`` (which ROI edits and ``set_crop`` funnel through).
+        Widgets editing the session in place (deleting an ROI or a leaf box) call
+        it themselves.
+        """
+        self._revision += 1
