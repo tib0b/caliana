@@ -75,7 +75,7 @@ class Session:
 
         Shorthand for ``Session().load(...)``, and the normal entry point.
 
-        ``import_kwargs`` are ``ImportParams`` fields — the "downsample on load"
+        ``import_kwargs`` are ``ImportParams`` fields and the "downsample on load"
         controls, so a multi-GB recording never has to fit in RAM. All are
         optional; the default loads the file as-is:
 
@@ -156,11 +156,11 @@ class Session:
         return run_widget_blocking(lambda: ImportPreviewWidget(self))
 
     def max_projection(self) -> np.ndarray:
-        """Per-pixel max-over-time image of the working stack, normalized to [0, 1]."""
+        """Per-pixel max-over-time image of the normalized intensity of the working stack."""
         self._require_data()
         mip = self._working_stack().max(axis=0).astype(float)
-        rng = float(mip.max() - mip.min())
-        return (mip - mip.min()) / rng if rng else mip
+        f0 = self._working_stack()[0].astype(float)
+        return (mip - f0) / f0
 
     # ---------------------------------------------------------------- Stage II
     def add_leaf_region(self, bbox, label: str = "") -> LeafRegion:
@@ -173,7 +173,7 @@ class Session:
     def register(
         self,
         mode=RegistrationMode.WHOLE_FRAME,
-        reference: str = "mean",
+        reference: str = "first",
         mask: bool = False,
         apply: bool = True,
         transformation: str = "affine",
@@ -183,7 +183,7 @@ class Session:
         mode: ``RegistrationMode.NONE`` (ROIs on the raw stack), ``WHOLE_FRAME``
             (one transform per frame), or ``PER_LEAF`` (each leaf box registered
             independently; requires ``add_leaf_region`` first).
-        reference: ``"mean"`` (default), ``"first"``, or ``"previous"``.
+        reference: ``"first"`` (default), ``"mean"``, or ``"previous"``.
         transformation: pystackreg model — ``"translation"``, ``"rigid_body"``,
             ``"scaled_rotation"``, or ``"affine"`` (default). Scale/shear is kept
             and carries through to the stabilized stack and ROI tracking.
@@ -191,8 +191,13 @@ class Session:
             leaf rather than the static bright background (recommended here).
         apply: ``True`` warps the stack into ``registered_data`` and samples static
             ROIs on it; ``False`` keeps raw pixels and moves each ROI with its
-            tissue at extraction time (``track_motion``), avoiding interpolation
-            bias in ΔF/F — preferable on dim, low-SNR data.
+            tissue at extraction time, some parts of the leaf box might have 
+            undefined intensity values during the recording, which leads to errors 
+            in the ROI traces when the ROIs move out of the box. 
+            ``False`` avoids this issue by instead moving the ROIs on the static
+            data, which eliminates the risk of rois moving onto undefined areas.
+            This comes at the cost of performance, as the transform needs to be 
+            reapplied each time a ROI is updated.
         """
         self._require_data()
         mode = RegistrationMode(mode)

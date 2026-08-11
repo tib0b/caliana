@@ -28,7 +28,7 @@ from .session import Session
 from .space import SpatialScale
 from .timeline import Event, Timeline
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def open_session(path=None) -> Session:
