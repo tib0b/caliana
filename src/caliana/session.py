@@ -184,7 +184,7 @@ class Session:
             (one transform per frame), or ``PER_LEAF`` (each leaf box registered
             independently; requires ``add_leaf_region`` first).
         reference: ``"mean"`` (default), ``"first"``, or ``"previous"``.
-        transformation: pystackreg model — ``"translation"``, ``"rigid_body"``,
+        transformation: TurboReg model — ``"translation"``, ``"rigid_body"``,
             ``"scaled_rotation"``, or ``"affine"`` (default). Scale/shear is kept
             and carries through to the stabilized stack and ROI tracking.
         mask: estimate on the tissue silhouette, so registration tracks the dim

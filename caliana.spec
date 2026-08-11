@@ -14,7 +14,7 @@ shipping to; PyInstaller does not cross-compile.
 The three things this spec exists to fix, all of them cases where PyInstaller's
 static analysis cannot see an import:
 
-- **nd2 / pystackreg** are imported lazily, inside the functions that need them
+- **nd2 / crabstack** are imported lazily, inside the functions that need them
   (so ``import caliana`` works without them), which means nothing references
   them at module level for the analyser to follow.
 - **qtpy** picks its binding at runtime from what is installed, so no Qt import
@@ -28,8 +28,8 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 hiddenimports = [
     # Lazily imported readers/estimators (caliana/io.py, caliana/registration.py).
     *collect_submodules("nd2"),
-    *collect_submodules("pystackreg"),
-    "pystackreg.turboreg",            # the C extension doing the estimation
+    *collect_submodules("crabstack"),
+    "crabstack.crabstack",            # the Rust extension doing the estimation
     # nd2 hands back dask-backed arrays; dask's scheduler is plugin-loaded.
     *collect_submodules("dask"),
     "xarray",
@@ -43,7 +43,7 @@ hiddenimports = [
 ]
 
 # Compiled extensions PyInstaller can miss when the module is imported lazily.
-binaries = collect_dynamic_libs("pystackreg")
+binaries = collect_dynamic_libs("crabstack")
 
 excludes = [
     # Other Qt bindings: qtpy would have a choice to make inside the bundle, and

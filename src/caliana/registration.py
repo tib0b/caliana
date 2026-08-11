@@ -1,12 +1,11 @@
 """Motion correction (leaf-motion registration).
 
 Three modes — none / whole-frame / per-leaf. Estimation runs on the downsampled
-stack via ``pystackreg`` (imported lazily). Per-leaf mode registers each leaf
-box's sub-stack independently and flags drift-out-of-box frames as low-confidence.
+stack via ``crabstack`` (a Rust port of pystackreg's TurboReg core, imported
+lazily through ``._stackreg``). Per-leaf mode registers each leaf box's sub-stack
+independently and flags drift-out-of-box frames as low-confidence.
 """
 from __future__ import annotations
-
-import warnings
 
 import numpy as np
 
@@ -99,7 +98,7 @@ def _silhouette_stack(stack: np.ndarray) -> np.ndarray:
 
 
 def _matrix_to_rigid(m: np.ndarray) -> RigidTransform:
-    """Wrap a pystackreg 3x3 homogeneous transform as a ``RigidTransform``.
+    """Wrap an estimated 3x3 homogeneous transform as a ``RigidTransform``.
 
     Keeps the matrix verbatim (authoritative, so scale/shear survives) and also
     reads off the rigid summary — translation from the last column, rotation from
@@ -123,10 +122,10 @@ def _rigid_to_matrix(tf: RigidTransform) -> np.ndarray:
     return np.array([[c, -s, tf.dx], [s, c, tf.dy], [0.0, 0.0, 1.0]], dtype=float)
 
 
-# Accepted ``transformation`` names → pystackreg model, so callers never import
-# pystackreg to pick one. Ordered least→most free (translation ⊂ rigid ⊂ scaled
-# rotation ⊂ affine). BILINEAR is excluded: its 4x4 form can't round-trip through
-# ``RigidTransform.matrix``.
+# Accepted ``transformation`` names → TurboReg model, so callers never import the
+# registration backend to pick one. Ordered least→most free (translation ⊂ rigid
+# ⊂ scaled rotation ⊂ affine). BILINEAR is excluded: its 4x4 form can't
+# round-trip through ``RigidTransform.matrix``.
 _STACKREG_TRANSFORMS = {
     "translation": "TRANSLATION",
     "rigid_body": "RIGID_BODY",
@@ -140,7 +139,7 @@ def _resolve_transformation(transformation: str) -> int:
     """Map a ``transformation`` name (see ``_STACKREG_TRANSFORMS``) to its
     ``StackReg`` model constant. Raises ``ValueError`` on an unknown name.
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     try:
         attr = _STACKREG_TRANSFORMS[transformation]
@@ -161,24 +160,21 @@ def register_whole_frame(
     """Estimate one transform per frame against a fixed reference.
 
     reference: ``"mean"`` (default), ``"first"``, or ``"previous"``.
-    transformation: pystackreg model — ``"translation"``, ``"rigid_body"``
+    transformation: TurboReg model — ``"translation"``, ``"rigid_body"``
         (alias ``"rigid"``), ``"scaled_rotation"``, or ``"affine"`` (default). The
         full estimated matrix is kept, so scale/shear survives to warping and ROIs.
     mask: estimate on the per-frame tissue silhouette instead of raw intensities,
         so registration tracks the dim leaf rather than the static bright
         background (recommended for these recordings).
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     if reference not in ("mean", "first", "previous"):
         raise ValueError(f"Unknown reference {reference!r} (expected 'mean' | 'first' | 'previous')")
 
     est = _silhouette_stack(stack) if mask else np.asarray(stack, dtype=float)
     sr = StackReg(_resolve_transformation(transformation))
-    with warnings.catch_warnings():
-        # Our contract fixes time on axis 0; silence pystackreg's axis heuristic.
-        warnings.filterwarnings("ignore", message=".*possible time axis.*")
-        tmats = sr.register_stack(est, reference=reference)
+    tmats = sr.register_stack(est, reference=reference)
     transforms = [_matrix_to_rigid(m) for m in tmats]
     return RegistrationResult(
         mode=RegistrationMode.WHOLE_FRAME, reference=reference, transforms=transforms
@@ -247,7 +243,7 @@ def apply_transforms(stack: np.ndarray, transforms: list[RigidTransform]) -> np.
     and ``stack`` differ in length. Non-rigid estimates (scale/shear) are applied
     exactly, since warping uses the stored matrix.
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     if len(transforms) != len(stack):
         raise ValueError(

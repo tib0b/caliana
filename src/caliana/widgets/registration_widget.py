@@ -29,7 +29,7 @@ _MODES = {
     "Per leaf": RegistrationMode.PER_LEAF,
 }
 
-# pystackreg models, coarsest first (see registration._STACKREG_TRANSFORMS).
+# TurboReg models, coarsest first (see registration._STACKREG_TRANSFORMS).
 _TRANSFORMS = ["translation", "rigid_body", "scaled_rotation", "affine"]
 
 _REFERENCES = ["previous", "first", "mean"]
@@ -85,7 +85,7 @@ class RegistrationWidget(QtWidgets.QWidget):
         self.transform_box.addItems(_TRANSFORMS)
         self.transform_box.setCurrentText("affine")
         self.transform_box.setToolTip(
-            "pystackreg transformation estimated per frame. Coarser models are "
+            "Transformation estimated per frame. Coarser models are "
             "more constrained and more robust on low-contrast tissue; affine also "
             "absorbs scale and shear."
         )

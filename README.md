@@ -33,6 +33,22 @@ pip install -e .            # everything except test tooling
 pip install -e '.[dev]'     # + pytest
 ```
 
+### Registration backend
+
+Motion correction runs on `crabstack`, a Rust port of the TurboReg core behind
+[pystackreg](https://github.com/glichtner/pystackreg) — same algorithm and the
+same matrices, roughly 3× faster on a stack (and warped frames agree to one
+float32 ulp). It is not published on PyPI, so the commands above cannot
+install it; build it once from a checkout of the crate (needs a Rust toolchain):
+
+```bash
+pip install maturin
+cd crabstack-rs && maturin develop --release
+```
+
+Everything except Stage II works without it; the registration call raises with
+these instructions if it is missing.
+
 ## Quickstart
 
 Two ways in, over the same `Session`: the app if you'd rather not write Python,
@@ -134,6 +150,7 @@ pyinstaller caliana.spec        # -> dist/caliana/
 | `space.py` | Space axis (pixels, optionally calibrated to µm) + unit helpers (§3) |
 | `io.py` | Load TIFF/nd2 + downsample-on-load + scale metadata (§3 Stage I) |
 | `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
+| `_stackreg.py` | Per-frame/stack registration on the crabstack backend (§3 Stage II) |
 | `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
 | `analysis.py` | ΔF/F, response-onset timing, propagation, kymographs, custom callables (§3 Stage III) |
 | `export.py` | Traces CSV, stack TIFF, provenance JSON (§4) |

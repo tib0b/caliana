@@ -68,7 +68,7 @@ wrapper or the app shell.
 - **PyQt/PySide** for widgets; **pyqtgraph** for fast image display, scrubbing,
   and interactive plots.
 - **tifffile** for (OME-)TIFF; **nd2** (or nd2reader) for Nikon `.nd2`.
-- **pystackreg** (or scikit-image) for rigid registration.
+- **crabstack** (the Rust port of pystackreg/TurboReg) for rigid registration.
 - **scipy** for peak detection and signal utilities.
 
 ## 3. Workflow
@@ -121,14 +121,14 @@ Registration is the leaf-motion-tracking mechanism: by stabilizing the image,
 static ROIs stay on the same tissue (no per-ROI template tracking). Every mode
 uses a single **global (linear) transform per frame**; non-rigid/elastic warping
 stays out of scope, because it risks distorting the intensity traces. Within
-that, the transformation model is the user's choice — pystackreg's
+that, the transformation model is the user's choice — TurboReg's
 `translation`, `rigid_body` (translation + rotation), `scaled_rotation` or
 `affine`, the last being the implementation's default and the one the app's
 registration widget offers first. Rigid remains the *conservative* choice, and
 the right one when scale/shear in the estimate would be motion the tissue cannot
 actually have; the looser models exist because leaves seen through a fixed lens
 do change apparent size as they move. Transforms are always estimated on the
-**downsampled** stack (via pystackreg) and reference defaults to the **mean
+**downsampled** stack (via crabstack) and reference defaults to the **mean
 image** (fallback: first frame). Per-frame transforms are stored on the `Session`
 so the stabilized stack can be exported and the run is reproducible.
 

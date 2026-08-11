@@ -16,7 +16,8 @@ dependencies = [
     "numpy",
     "scipy",
     "tifffile",
-    "pystackreg",          # whole-frame / per-leaf rigid registration (SPEC §3 Stage II)
+    # Registration (SPEC §3 Stage II) runs on `crabstack`, which is not on PyPI
+    # and so cannot be listed here — install it separately, see README ▸ Install.
     # Stage I .nd2 loading (lazy, dask-backed; xarray gives named dims)
     "nd2",
     "dask",
