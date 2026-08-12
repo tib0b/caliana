@@ -1,0 +1,85 @@
+# Tests on every push. The release workflow does not re-run these, so this is
+# the gate: a tag is only ever cut from a commit that passed here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crabstack-rs
+
+      # The differential tests need the C++ oracle, built from an unmodified
+      # pystackreg checkout. Without it they skip themselves — which would make
+      # this job green while testing none of the parity that matters, so CI
+      # checks the binary exists rather than trusting the skip.
+      - name: Check out pystackreg (oracle source)
+        uses: actions/checkout@v4
+        with:
+          repository: glichtner/pystackreg
+          path: pystackreg
+      - name: Build the C++ oracle
+        working-directory: crabstack-rs
+        run: |
+          PYSTACKREG="$GITHUB_WORKSPACE/pystackreg" ./tests/build_oracle.sh
+          test -x oracle/oracle
+
+      - name: Test
+        working-directory: crabstack-rs
+        run: cargo test --release
+      - name: Lint
+        working-directory: crabstack-rs
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+  python:
+    name: pytest (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest and newest supported: the abi3 extension is built once against
+        # 3.10 and loaded unchanged by later versions, so these two ends are
+        # what actually exercise that promise.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crabstack-rs
+
+      # Qt needs a display and system libraries even for import-time work.
+      - name: System libraries for Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+
+      - name: Install
+        run: |
+          pip install maturin
+          maturin develop --release -E dev
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q

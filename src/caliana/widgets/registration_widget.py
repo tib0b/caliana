@@ -29,7 +29,7 @@ _MODES = {
     "Per leaf": RegistrationMode.PER_LEAF,
 }
 
-# pystackreg models, coarsest first (see registration._STACKREG_TRANSFORMS).
+# TurboReg models, coarsest first (see registration._STACKREG_TRANSFORMS).
 _TRANSFORMS = ["translation", "rigid_body", "scaled_rotation", "affine"]
 
 _REFERENCES = ["previous", "first", "mean"]
@@ -85,20 +85,12 @@ class RegistrationWidget(QtWidgets.QWidget):
         self.transform_box.addItems(_TRANSFORMS)
         self.transform_box.setCurrentText("affine")
         self.transform_box.setToolTip(
-            "pystackreg transformation estimated per frame. Coarser models are "
+            "Transformation estimated per frame. Coarser models are "
             "more constrained and more robust on low-contrast tissue; affine also "
             "absorbs scale and shear."
         )
         row.addWidget(self.transform_box)
 
-        self.mask_check = QtWidgets.QCheckBox("Mask to tissue")
-        self.mask_check.setToolTip(
-            "Estimate motion on the tissue silhouette instead of raw intensities, "
-            "so registration tracks the dim leaf rather than the static bright "
-            "background -- curently unsuported"
-        )
-        self.mask_check.setChecked(False)
-        row.addWidget(self.mask_check)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -135,7 +127,8 @@ class RegistrationWidget(QtWidgets.QWidget):
         self._mode_hint.setAlignment(QtCore.Qt.AlignCenter)
         self.left_stack.addWidget(self._mode_hint)              # 0: no boxes needed
         # Full reuse: the same widget `select_leaves` opens, docked as our image
-        # pane. It owns box drawing and writes straight to session.leaf_regions.
+        # pane. It owns box and mask drawing, and writes straight to
+        # session.leaf_regions.
         self.leaf_panel = LeafSelectionWidget(self.session)
         self.left_stack.addWidget(self.leaf_panel)              # 1: per-leaf mode
         split.addWidget(self.left_stack)
@@ -214,8 +207,7 @@ class RegistrationWidget(QtWidgets.QWidget):
             return None
 
         kwargs = dict(
-            mode=mode, reference=self.ref_box.currentText(),
-            mask=self.mask_check.isChecked(), apply=self.apply_warp,
+            mode=mode, reference=self.ref_box.currentText(), apply=self.apply_warp,
             transformation=self.transform_box.currentText(),
         )
         self._set_busy(True)
@@ -247,7 +239,7 @@ class RegistrationWidget(QtWidgets.QWidget):
 
     def _set_busy(self, busy: bool):
         for w in (self.run_btn, self.mode_box, self.ref_box, self.transform_box,
-                  self.mask_check, self.apply_box, self.leaf_panel):
+                  self.apply_box, self.leaf_panel):
             w.setEnabled(not busy)
 
     # ------------------------------------------------------------- results
@@ -268,7 +260,6 @@ class RegistrationWidget(QtWidgets.QWidget):
             # notebook), since the Session does not carry the model used.
             if self._last_run is not None:
                 lines.append(f"model: {self._last_run['transformation']}")
-                lines.append(f"masked to tissue: {'yes' if self._last_run['mask'] else 'no'}")
             lines.append("correction: " + ("stabilized stack (ROIs static)"
                                            if self.session.registered_data is not None
                                            else "ROIs follow the tissue (raw pixels)"))
@@ -279,8 +270,10 @@ class RegistrationWidget(QtWidgets.QWidget):
             for i, leaf in enumerate(self.session.leaf_regions):
                 name = leaf.label or f"leaf {i}"
                 flagged = leaf.low_confidence_frames
+                masked = (f", masked to {len(leaf.mask_polygon)}-point outline"
+                          if leaf.mask_polygon else "")
                 lines.append(f"{name}: bbox={tuple(leaf.bbox)}, "
-                             f"{len(leaf.transforms)} frames")
+                             f"{len(leaf.transforms)} frames{masked}")
                 if flagged:
                     shown = ", ".join(str(f) for f in flagged[:12])
                     more = "…" if len(flagged) > 12 else ""
@@ -304,7 +297,7 @@ class RegistrationWidget(QtWidgets.QWidget):
             "No boxes to draw; press “Run registration”."
         )
         estimating = mode != RegistrationMode.NONE
-        for w in (self.ref_box, self.transform_box, self.mask_check, self.apply_box):
+        for w in (self.ref_box, self.transform_box, self.apply_box):
             w.setEnabled(estimating)
 
     def closeEvent(self, event):

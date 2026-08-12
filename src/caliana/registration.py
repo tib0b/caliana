@@ -1,16 +1,17 @@
 """Motion correction (leaf-motion registration).
 
 Three modes — none / whole-frame / per-leaf. Estimation runs on the downsampled
-stack via ``pystackreg`` (imported lazily). Per-leaf mode registers each leaf
-box's sub-stack independently and flags drift-out-of-box frames as low-confidence.
+stack via ``crabstack`` (a Rust port of pystackreg's TurboReg core, imported
+lazily through ``._stackreg``). Per-leaf mode registers each leaf box's sub-stack
+independently and flags drift-out-of-box frames as low-confidence; a box may
+carry a hand-drawn mask polygon naming the tissue to track inside it.
 """
 from __future__ import annotations
-
-import warnings
 
 import numpy as np
 
 from .models import LeafRegion, RegistrationResult, RegistrationMode, RigidTransform
+from .roi import polygon_mask
 
 
 def make_reference(stack: np.ndarray, reference: str = "mean") -> np.ndarray:
@@ -44,62 +45,26 @@ def map_point(point_yx, tf: RigidTransform, origin_yx=(0.0, 0.0)) -> tuple[float
     return ry + oy, rx + ox
 
 
-def _otsu_threshold(values: np.ndarray) -> float:
-    """Otsu's threshold on a 1-D array of intensities (numpy only, no skimage).
+def leaf_mask(leaf: LeafRegion, shape_yx: tuple[int, int]) -> np.ndarray | None:
+    """Rasterize a leaf's hand-drawn mask polygon over its *cropped* sub-stack.
 
-    Splits the histogram into two classes maximizing between-class variance.
+    ``leaf.mask_polygon`` is stored in full-frame coordinates (that is what the
+    widget draws in), while estimation runs on the box crop, so the outline is
+    shifted by the box's top-left corner first; whatever falls outside the box is
+    clipped away. Returns ``None`` when the leaf carries no usable outline —
+    fewer than 3 vertices, or nothing of it inside the box — which is the "use
+    every pixel" case.
     """
-    v = np.asarray(values, dtype=float).ravel()
-    hist, edges = np.histogram(v, bins=256)
-    hist = hist.astype(float)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    w = np.cumsum(hist)
-    total = w[-1]
-    if total == 0:
-        return float(v.mean()) if v.size else 0.0
-    wsum = np.cumsum(hist * centers)
-    wb, wf = w, total - w
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mb = wsum / wb
-        mf = (wsum[-1] - wsum) / wf
-        var_between = wb * wf * (mb - mf) ** 2
-    var_between[~np.isfinite(var_between)] = -np.inf
-    return float(centers[int(np.argmax(var_between))])
-
-
-def segment_tissue(image: np.ndarray, dark: bool = True, close: int = 2, open_: int = 2) -> np.ndarray:
-    """Boolean mask of the leaf tissue in a 2-D image, by Otsu threshold.
-
-    dark: True keeps pixels below the threshold (dark leaves on a bright
-    background — the usual case here); False keeps pixels above it.
-    close / open_: iterations of morphological closing / opening to fill small
-    holes and remove speckle (0 disables either).
-    """
-    from scipy.ndimage import binary_closing, binary_opening
-
-    img = np.asarray(image, dtype=float)
-    thr = _otsu_threshold(img)
-    mask = img < thr if dark else img > thr
-    if open_:
-        mask = binary_opening(mask, iterations=open_)
-    if close:
-        mask = binary_closing(mask, iterations=close)
-    return mask
-
-
-def _silhouette_stack(stack: np.ndarray) -> np.ndarray:
-    """Per-frame binary tissue silhouette (0/1), used as the registration target.
-
-    Registering silhouettes makes the moving leaf edge the dominant feature, so the
-    estimate tracks the tissue instead of the static bright background. Opt-in
-    (``mask=True``) because flickering segmentation would add jitter.
-    """
-    stack = np.asarray(stack, dtype=float)
-    return np.stack([segment_tissue(f).astype(float) for f in stack])
+    verts = leaf.mask_polygon or []
+    if len(verts) < 3:
+        return None
+    y0, _y1, x0, _x1 = leaf.bbox
+    mask = polygon_mask([(y - y0, x - x0) for (y, x) in verts], shape_yx)
+    return mask if mask.any() else None
 
 
 def _matrix_to_rigid(m: np.ndarray) -> RigidTransform:
-    """Wrap a pystackreg 3x3 homogeneous transform as a ``RigidTransform``.
+    """Wrap an estimated 3x3 homogeneous transform as a ``RigidTransform``.
 
     Keeps the matrix verbatim (authoritative, so scale/shear survives) and also
     reads off the rigid summary — translation from the last column, rotation from
@@ -123,10 +88,10 @@ def _rigid_to_matrix(tf: RigidTransform) -> np.ndarray:
     return np.array([[c, -s, tf.dx], [s, c, tf.dy], [0.0, 0.0, 1.0]], dtype=float)
 
 
-# Accepted ``transformation`` names → pystackreg model, so callers never import
-# pystackreg to pick one. Ordered least→most free (translation ⊂ rigid ⊂ scaled
-# rotation ⊂ affine). BILINEAR is excluded: its 4x4 form can't round-trip through
-# ``RigidTransform.matrix``.
+# Accepted ``transformation`` names → TurboReg model, so callers never import the
+# registration backend to pick one. Ordered least→most free (translation ⊂ rigid
+# ⊂ scaled rotation ⊂ affine). BILINEAR is excluded: its 4x4 form can't
+# round-trip through ``RigidTransform.matrix``.
 _STACKREG_TRANSFORMS = {
     "translation": "TRANSLATION",
     "rigid_body": "RIGID_BODY",
@@ -140,7 +105,7 @@ def _resolve_transformation(transformation: str) -> int:
     """Map a ``transformation`` name (see ``_STACKREG_TRANSFORMS``) to its
     ``StackReg`` model constant. Raises ``ValueError`` on an unknown name.
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     try:
         attr = _STACKREG_TRANSFORMS[transformation]
@@ -155,30 +120,38 @@ def _resolve_transformation(transformation: str) -> int:
 def register_whole_frame(
     stack: np.ndarray,
     reference: str = "mean",
-    mask: bool = False,
+    mask: np.ndarray | None = None,
     transformation: str = "affine",
 ) -> RegistrationResult:
     """Estimate one transform per frame against a fixed reference.
 
     reference: ``"mean"`` (default), ``"first"``, or ``"previous"``.
-    transformation: pystackreg model — ``"translation"``, ``"rigid_body"``
+    transformation: TurboReg model — ``"translation"``, ``"rigid_body"``
         (alias ``"rigid"``), ``"scaled_rotation"``, or ``"affine"`` (default). The
         full estimated matrix is kept, so scale/shear survives to warping and ROIs.
-    mask: estimate on the per-frame tissue silhouette instead of raw intensities,
-        so registration tracks the dim leaf rather than the static bright
-        background (recommended for these recordings).
+    mask: optional frame-shaped ``(Y, X)`` boolean array, True where a pixel may
+        take part in the fit. Static — the same pixels are compared in every frame
+        — so the estimate tracks the tissue you outlined instead of a bright
+        static background or a neighbouring leaf. Cut it a couple of pixels wider
+        than what you are excluding; the spline interpolation and the pyramid
+        spread a feature about that far past its own edge.
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     if reference not in ("mean", "first", "previous"):
         raise ValueError(f"Unknown reference {reference!r} (expected 'mean' | 'first' | 'previous')")
 
-    est = _silhouette_stack(stack) if mask else np.asarray(stack, dtype=float)
+    est = np.asarray(stack, dtype=float)
+    masks = None
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != est.shape[1:]:
+            raise ValueError(f"mask shape {mask.shape} does not match frames {est.shape[1:]}")
+        # One static mask, presented per-frame: a broadcast view, so a long
+        # recording costs one frame's worth of booleans, not T of them.
+        masks = np.broadcast_to(mask, est.shape)
     sr = StackReg(_resolve_transformation(transformation))
-    with warnings.catch_warnings():
-        # Our contract fixes time on axis 0; silence pystackreg's axis heuristic.
-        warnings.filterwarnings("ignore", message=".*possible time axis.*")
-        tmats = sr.register_stack(est, reference=reference)
+    tmats = sr.register_stack(est, reference=reference, masks=masks)
     transforms = [_matrix_to_rigid(m) for m in tmats]
     return RegistrationResult(
         mode=RegistrationMode.WHOLE_FRAME, reference=reference, transforms=transforms
@@ -201,14 +174,15 @@ def register_per_leaf(
     leaf_regions: list[LeafRegion],
     reference: str = "mean",
     drift_frac: float = 0.25,
-    mask: bool = False,
     transformation: str = "affine",
 ) -> list[LeafRegion]:
     """Register each leaf box's sub-stack independently, mutating ``leaf_regions``.
 
     For each leaf: crop to its bbox, estimate per-frame transforms, store its
-    reference, and flag drift-out frames in ``low_confidence_frames``.
-    reference / mask / transformation: as in ``register_whole_frame``.
+    reference, and flag drift-out frames in ``low_confidence_frames``. A leaf
+    carrying a ``mask_polygon`` is estimated on the pixels inside that outline
+    only (see ``leaf_mask``); the whole box is still warped.
+    reference / transformation: as in ``register_whole_frame``.
     drift_frac: fraction of the box's smaller side a frame may shift before being
         flagged low-confidence.
     """
@@ -217,7 +191,8 @@ def register_per_leaf(
         y0, y1, x0, x1 = leaf.bbox
         sub = stack[:, y0:y1, x0:x1]
         leaf.transforms = register_whole_frame(
-            sub, reference, mask=mask, transformation=transformation
+            sub, reference, mask=leaf_mask(leaf, sub.shape[1:]),
+            transformation=transformation,
         ).transforms
         leaf.reference = make_reference(np.asarray(sub, dtype=float), reference)
         leaf.low_confidence_frames = _drift_out_frames(leaf.transforms, sub.shape[1:], drift_frac)
@@ -247,7 +222,7 @@ def apply_transforms(stack: np.ndarray, transforms: list[RigidTransform]) -> np.
     and ``stack`` differ in length. Non-rigid estimates (scale/shear) are applied
     exactly, since warping uses the stored matrix.
     """
-    from pystackreg import StackReg
+    from ._stackreg import StackReg
 
     if len(transforms) != len(stack):
         raise ValueError(

@@ -26,12 +26,27 @@ pip install git+https://github.com/tib0b/caliana.git
 ```
 
 
-Or from a local checkout (editable):
+Or from a local checkout (editable). This one compiles the Rust extension, so it
+needs a [Rust toolchain](https://rustup.rs) — the two commands above do not,
+since they install a prebuilt wheel:
 
 ```bash
-pip install -e .            # everything except test tooling
-pip install -e '.[dev]'     # + pytest
+pip install maturin
+maturin develop --release           # editable install + the extension
+maturin develop --release -E dev    # + pytest
 ```
+
+### Registration backend
+
+Motion correction runs on `crabstack`, a Rust port of the TurboReg core behind
+[pystackreg](https://github.com/glichtner/pystackreg) — same algorithm and the
+same matrices, roughly 3× faster on a stack (and warped frames agree to one
+float32 ulp). It lives in [`crabstack-rs/`](crabstack-rs/) and is compiled into
+this package as `caliana._crabstack`, so it ships in the wheel and there is
+nothing extra to install.
+
+Working on the crate itself (its own test suite, benchmarks, and the C++
+differential oracle) is documented in [crabstack-rs/README.md](crabstack-rs/README.md).
 
 ## Quickstart
 
@@ -65,7 +80,11 @@ s.export_traces("traces.csv")
 ```
 
 `s.select_leaves()` and `s.crop_traces()` cover the two optional steps (per-leaf
-boxes, restricting every trace to one time window).
+boxes, restricting every trace to one time window). In the leaf window a box can
+also be **masked**: trace a polygon around the tissue to track, and only those
+pixels drive that box's motion estimate — the way to register a leaf whose box
+unavoidably also holds a neighbour or a bright static background. Headless, that
+is `s.set_leaf_mask(0, [(y, x), ...])` / `s.clear_leaf_mask(0)`.
 
 Because it is all one `Session`, widget steps and plain calls mix freely — do the
 ROIs by hand and the rest in code, or skip the windows entirely:
@@ -134,6 +153,7 @@ pyinstaller caliana.spec        # -> dist/caliana/
 | `space.py` | Space axis (pixels, optionally calibrated to µm) + unit helpers (§3) |
 | `io.py` | Load TIFF/nd2 + downsample-on-load + scale metadata (§3 Stage I) |
 | `registration.py` | Rigid motion correction: none / whole-frame / per-leaf (§3 Stage II) |
+| `_stackreg.py` | Per-frame/stack registration on the crabstack backend (§3 Stage II) |
 | `roi.py` | ROI masks, trace extraction, leaf assignment (§3 Stage II) |
 | `analysis.py` | ΔF/F, response-onset timing, propagation, kymographs, custom callables (§3 Stage III) |
 | `export.py` | Traces CSV, stack TIFF, provenance JSON (§4) |

@@ -14,6 +14,7 @@ from caliana.models import LeafRegion
 from caliana.registration import (
     apply_per_leaf,
     apply_transforms,
+    leaf_mask,
     register_per_leaf,
     register_whole_frame,
 )
@@ -155,6 +156,92 @@ def test_session_per_leaf_pipeline():
     assert len(s.provenance()["registration"]["leaf_regions"]) == 2
 
 
+# --------------------------------------------------------------------------- #
+# Manual leaf masks: estimate on the outlined tissue only
+# --------------------------------------------------------------------------- #
+_MASK_BOX = (10, 58, 10, 58)                     # the leaf box, in frame coords
+# A polygon over the box's upper-left quadrant — the moving blob, not the decoy.
+_MASK_POLY = [(12, 12), (12, 36), (36, 36), (36, 12)]
+
+
+def _decoy_stack(shifts, h=80, w=80):
+    """A leaf box holding a moving blob *and* a brighter static decoy.
+
+    The decoy does not move with the tissue, so an unmasked fit is dragged
+    towards standing still; it is what a mask is for.
+    """
+    yy, xx = np.mgrid[:h, :w]
+
+    def blob(cy, cx, sig, amp):
+        return amp * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sig ** 2)))
+
+    decoy = blob(46, 46, 3.0, 400.0)
+    moving = blob(24, 24, 4.0, 200.0)
+    return np.stack([100 + shift(moving, s, order=1, mode="nearest") + decoy
+                     for s in shifts])
+
+
+def test_leaf_mask_is_cropped_to_the_box():
+    """The outline is stored in frame coords and rasterized over the box crop."""
+    leaf = LeafRegion(bbox=_MASK_BOX, mask_polygon=_MASK_POLY)
+    mask = leaf_mask(leaf, (48, 48))
+    assert mask.shape == (48, 48)
+    assert mask[14, 14]                       # (24, 24) in frame coords: inside
+    assert not mask[40, 40]                   # (50, 50): the decoy corner, outside
+    # Nothing overlapping the box (or too few points) means "use every pixel".
+    assert leaf_mask(LeafRegion(bbox=(0, 8, 0, 8), mask_polygon=_MASK_POLY), (8, 8)) is None
+    assert leaf_mask(LeafRegion(bbox=_MASK_BOX, mask_polygon=[(12, 12), (36, 36)]),
+                     (48, 48)) is None
+
+
+def test_masked_leaf_follows_the_outlined_tissue():
+    """Masking to the moving blob recovers motion the static decoy hides."""
+    shifts = [(0.0, 0.0), (2.0, 3.0), (4.0, 6.0), (6.0, 9.0)]
+    stk = _decoy_stack(shifts)
+    free = [LeafRegion(bbox=_MASK_BOX)]
+    masked = [LeafRegion(bbox=_MASK_BOX, mask_polygon=_MASK_POLY)]
+
+    register_per_leaf(stk, free, reference="first", transformation="translation")
+    register_per_leaf(stk, masked, reference="first", transformation="translation")
+
+    for i, (dy, dx) in enumerate(shifts[1:], start=1):
+        truth = np.hypot(dy, dx)
+        got = np.hypot(masked[0].transforms[i].dy, masked[0].transforms[i].dx)
+        anchored = np.hypot(free[0].transforms[i].dy, free[0].transforms[i].dx)
+        assert abs(got - truth) < 0.5, f"frame {i}: masked {got:.3g} vs {truth:.3g}"
+        assert anchored < 0.6 * truth, f"frame {i}: unmasked {anchored:.3g} not anchored"
+
+
+def test_session_leaf_mask_round_trip():
+    """set/clear_leaf_mask reach the model, the estimate and the provenance."""
+    stk = _decoy_stack([(0.0, 0.0), (2.0, 3.0), (4.0, 6.0)])
+    s = caliana.Session()
+    s.data = stk
+    s.timeline = caliana.Timeline(n_frames=len(stk))
+    leaf = s.add_leaf_region(_MASK_BOX, label="masked")
+    s.set_leaf_mask(leaf, _MASK_POLY)
+    assert leaf.mask_polygon == [tuple(v) for v in _MASK_POLY]
+    assert s.provenance()["registration"]["leaf_regions"][0]["mask_polygon"][0] == [12, 12]
+
+    s.register(caliana.RegistrationMode.PER_LEAF, reference="first",
+               transformation="translation", apply=False)
+    masked = [np.hypot(t.dy, t.dx) for t in leaf.transforms]
+
+    s.clear_leaf_mask(0)
+    assert leaf.mask_polygon is None
+    assert s.provenance()["registration"]["leaf_regions"][0]["mask_polygon"] is None
+    s.register(caliana.RegistrationMode.PER_LEAF, reference="first",
+               transformation="translation", apply=False)
+    assert masked[-1] > [np.hypot(t.dy, t.dx) for t in leaf.transforms][-1]
+
+    try:
+        s.set_leaf_mask(leaf, [(12, 12), (36, 36)])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a 2-point mask polygon should be rejected")
+
+
 if __name__ == "__main__":
     test_translation_recovered()
     test_translation_plus_rotation_stabilizes()
@@ -162,4 +249,7 @@ if __name__ == "__main__":
     test_per_leaf_stabilizes_independent_motion()
     test_per_leaf_flags_drift_out()
     test_session_per_leaf_pipeline()
+    test_leaf_mask_is_cropped_to_the_box()
+    test_masked_leaf_follows_the_outlined_tissue()
+    test_session_leaf_mask_round_trip()
     print("registration tests OK")

@@ -1,0 +1,152 @@
+# Build wheels for every platform we ship, then publish them to PyPI.
+#
+# Triggered by pushing a version tag:
+#
+#     git tag v0.3.1 && git push origin v0.3.1
+#
+# The version in the tag is not what gets published — pyproject.toml's is. The
+# `check-version` job fails the run if they disagree, rather than silently
+# shipping a wheel whose version does not match the tag it came from.
+#
+# Publishing uses PyPI trusted publishing (OpenID Connect), so there is no API
+# token in the repository secrets. One-time setup, on
+# https://pypi.org/manage/project/caliana/settings/publishing/:
+#
+#     owner            tib0b
+#     repository       caliana
+#     workflow         release.yml
+#     environment      pypi
+#
+# and a matching `pypi` environment under the repo's Settings ▸ Environments
+# (worth a required reviewer, which makes every publish a manual approval).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Building wheels without publishing them, to check the matrix still works.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Tag matches pyproject version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$proj" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $proj"
+            exit 1
+          fi
+          echo "publishing $proj"
+
+  wheels:
+    name: ${{ matrix.target }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest,  target: aarch64, manylinux: auto }
+          - { os: macos-14,       target: aarch64 }   # Apple Silicon
+          - { os: macos-13,       target: x86_64 }    # Intel
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          # --release for the crate's LTO profile; the interpreter arg pins the
+          # abi3 floor, so each of these builds one wheel covering 3.10+.
+          args: --release --out dist --interpreter 3.10
+          # Cross-compiled builds (aarch64 here) run in a container image with
+          # the Rust toolchain; sccache keeps the LTO rebuilds tolerable.
+          sccache: "true"
+          # NOTE: do not add `-C target-cpu=...` to RUSTFLAGS. The AVX2 kernels
+          # are selected at runtime by is_x86_feature_detected! (see
+          # crabstack-rs/src/parallel.rs), so a baseline build already reaches
+          # them on capable machines — while raising the baseline would produce
+          # wheels that fault on older CPUs, and pass every test on ours.
+
+      - name: Smoke-test the wheel
+        # Only where the runner can execute what was just built: the aarch64
+        # Linux wheels are cross-compiled, so there is no native host for them.
+        if: matrix.target != 'aarch64' || startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          # The wheel by path, not `--find-links dist --no-index caliana`: the
+          # latter cannot resolve numpy and the rest, which are not in dist/.
+          python -m pip install dist/*.whl
+          python -c "
+          import numpy as np
+          from caliana import _crabstack as cs
+          from caliana._stackreg import StackReg
+          a = np.random.default_rng(0).random((64, 64))
+          b = np.roll(a, (3, 2), axis=(0, 1))
+          m = StackReg(StackReg.TRANSLATION).register(a, b)
+          assert np.allclose(m[:2, 2], [2, 3], atol=1e-3), m
+          print('ok, threads:', cs.num_threads())
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Anyone on a platform the wheels above do not cover falls back to this
+      # and compiles it themselves, so it has to carry the Rust sources.
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    needs: [check-version, wheels, sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: pypi
+    permissions:
+      id-token: write      # mints the OIDC token trusted publishing uses
+      contents: write      # for the GitHub Release below
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - run: ls -l dist
+
+      # This action, not `maturin upload`: trusted publishing is an OIDC token
+      # exchange with PyPI, and this is what performs it. maturin's uploader
+      # expects an API token instead, which is the thing we are avoiding.
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

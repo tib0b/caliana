@@ -154,6 +154,55 @@ def test_leaf_selection_widget():
     print("leaf selection widget OK")
 
 
+def test_leaf_widget_mask_polygon():
+    """Tracing a polygon inside a leaf box masks that box's registration."""
+    if not HAVE_GUI:
+        print("GUI stack not available; skipping widget test")
+        return
+    ensure_app()
+    s = _session()
+    w = LeafSelectionWidget(s)
+    masked = w.add_leaf_box((0, 20, 0, 16))
+    other = w.add_leaf_box((20, 31, 16, 23))
+
+    # Trace an outline inside the first box: it commits to that box alone.
+    w.mask_btn.setChecked(True)
+    assert not w.leaf_btn.isEnabled()             # boxes frozen while tracing
+    for point in [(4, 3), (4, 12), (15, 12), (15, 3)]:
+        w.add_mask_point(*point)
+    w.finish_mask()
+    assert masked.mask_polygon == [(4, 3), (4, 12), (15, 12), (15, 3)]
+    assert other.mask_polygon is None
+    assert w._leaf_records[0]["mask"] is not None
+    assert w.leaf_btn.isEnabled()
+
+    # Dragging the box carries its outline along.
+    w._leaf_records[0]["item"].setPos(2, 3)       # (x, y) => dy=3, dx=2
+    assert masked.mask_polygon[0] == (7, 5)
+
+    # Editing the polygon graphic writes back to the model.
+    w._leaf_records[0]["mask"].setPos(1, 0)
+    assert masked.mask_polygon[0] == (7, 6)
+
+    # An outline traced over no box is dropped rather than stored anywhere.
+    w.mask_btn.setChecked(True)
+    for point in [(2, 20), (2, 22), (5, 22)]:
+        w.add_mask_point(*point)
+    w.finish_mask()
+    assert other.mask_polygon is None
+    assert "discarded" in w.hint.text()
+
+    # Reload rebuilds the outline from the model, exactly one graphic per mask.
+    w.reload()
+    assert [r["mask"] is not None for r in w._leaf_records] == [True, False]
+
+    w.clear_masks()
+    assert masked.mask_polygon is None and w._leaf_records[0]["mask"] is None
+
+    w.close()
+    print("leaf mask polygon OK")
+
+
 def test_roi_widget_shows_leaf_reference():
     """Leaf boxes drawn elsewhere appear in the ROI widget as non-interactive
     reference, and clicks inside them still place ROIs (no click stealing)."""
@@ -1226,6 +1275,7 @@ if __name__ == "__main__":
     test_import_preview_widget()
     test_roi_selection_widget()
     test_leaf_selection_widget()
+    test_leaf_widget_mask_polygon()
     test_roi_widget_shows_leaf_reference()
     test_roi_widget_freehand()
     test_roi_widget_track_motion()

@@ -13,6 +13,8 @@ Quick start (headless):
 """
 from __future__ import annotations
 
+from importlib import metadata as _metadata
+
 from .models import (
     ROI,
     BaselineMethod,
@@ -28,7 +30,14 @@ from .session import Session
 from .space import SpatialScale
 from .timeline import Event, Timeline
 
-__version__ = "0.3.1"
+# The version lives in pyproject.toml, which maturin bakes into the installed
+# distribution's metadata — the reverse of the old setuptools arrangement, where
+# this attribute was the source. The fallback covers running straight from a
+# source tree that was never installed.
+try:
+    __version__ = _metadata.version("caliana")
+except _metadata.PackageNotFoundError:  # pragma: no cover - source tree, not installed
+    __version__ = "0.0.0.dev0"
 
 
 def open_session(path=None) -> Session:

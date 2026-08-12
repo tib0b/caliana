@@ -170,11 +170,46 @@ class Session:
         self._bump()
         return leaf
 
+    def set_leaf_mask(self, leaf, vertices) -> LeafRegion:
+        """Restrict a leaf box's motion estimate to a hand-drawn polygon.
+
+        leaf: a ``LeafRegion`` or its index in ``leaf_regions``.
+        vertices: at least 3 ``(y, x)`` outline points, in the loaded stack's
+            pixel coordinates (the same ones ``bbox`` uses). The part of the
+            outline outside the box is ignored, so drawing it inside the box is
+            what makes it mean anything.
+
+        Only the pixels inside the outline take part in the fit; the whole box is
+        still warped. Use it when a box unavoidably contains something that does
+        not move with the leaf — a neighbouring leaf, a bright static background —
+        which would otherwise anchor the estimate. Draw it a couple of pixels
+        outside the tissue's edge rather than exactly on it.
+        """
+        leaf = self._leaf(leaf)
+        verts = [tuple(v) for v in vertices]
+        if len(verts) < 3:
+            raise ValueError(f"a mask polygon needs at least 3 vertices, got {len(verts)}")
+        leaf.mask_polygon = verts
+        self._bump()
+        return leaf
+
+    def clear_leaf_mask(self, leaf) -> LeafRegion:
+        """Drop a leaf box's mask polygon, estimating on the whole box again."""
+        leaf = self._leaf(leaf)
+        leaf.mask_polygon = None
+        self._bump()
+        return leaf
+
+    def _leaf(self, leaf) -> LeafRegion:
+        """A ``LeafRegion`` from either the object itself or its index."""
+        if isinstance(leaf, LeafRegion):
+            return leaf
+        return self.leaf_regions[leaf]
+
     def register(
         self,
         mode=RegistrationMode.WHOLE_FRAME,
         reference: str = "first",
-        mask: bool = False,
         apply: bool = True,
         transformation: str = "affine",
     ) -> Session:
@@ -182,13 +217,12 @@ class Session:
 
         mode: ``RegistrationMode.NONE`` (ROIs on the raw stack), ``WHOLE_FRAME``
             (one transform per frame), or ``PER_LEAF`` (each leaf box registered
-            independently; requires ``add_leaf_region`` first).
+            independently; requires ``add_leaf_region`` first, and honours any
+            ``set_leaf_mask`` outline drawn inside a box).
         reference: ``"first"`` (default), ``"mean"``, or ``"previous"``.
-        transformation: pystackreg model — ``"translation"``, ``"rigid_body"``,
+        transformation: TurboReg model — ``"translation"``, ``"rigid_body"``,
             ``"scaled_rotation"``, or ``"affine"`` (default). Scale/shear is kept
             and carries through to the stabilized stack and ROI tracking.
-        mask: estimate on the tissue silhouette, so registration tracks the dim
-            leaf rather than the static bright background (recommended here).
         apply: ``True`` warps the stack into ``registered_data`` and samples static
             ROIs on it; ``False`` keeps raw pixels and moves each ROI with its
             tissue at extraction time, some parts of the leaf box might have 
@@ -207,7 +241,7 @@ class Session:
             self.registration = RegistrationResult(mode=mode, reference=reference)
         elif mode == RegistrationMode.WHOLE_FRAME:
             self.registration = registration_mod.register_whole_frame(
-                self.data, reference, mask=mask, transformation=transformation
+                self.data, reference, transformation=transformation
             )
             if apply:
                 self.registered_data = registration_mod.apply_transforms(
@@ -219,7 +253,7 @@ class Session:
             if not self.leaf_regions:
                 raise ValueError("per-leaf mode requires leaf_regions; draw boxes first")
             self.leaf_regions = registration_mod.register_per_leaf(
-                self.data, self.leaf_regions, reference, mask=mask,
+                self.data, self.leaf_regions, reference,
                 transformation=transformation,
             )
             if apply:
@@ -559,6 +593,8 @@ class Session:
                 "motion_tracking": self.track_motion,
                 "leaf_regions": [
                     {"bbox": list(lr.bbox), "label": lr.label,
+                     "mask_polygon": (None if lr.mask_polygon is None
+                                      else [list(v) for v in lr.mask_polygon]),
                      "low_confidence_frames": lr.low_confidence_frames}
                     for lr in self.leaf_regions
                 ],
