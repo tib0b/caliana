@@ -75,10 +75,12 @@ jobs:
           sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
             libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
 
+      # `pip install -e`, not `maturin develop`: the develop *command* insists on
+      # finding a virtualenv, and setup-python provides a plain interpreter. The
+      # editable install goes through maturin as a PEP 517/660 build backend
+      # instead, which builds the same extension into src/caliana/ without one.
       - name: Install
-        run: |
-          pip install maturin
-          maturin develop --release -E dev
+        run: pip install -e '.[dev]'
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
