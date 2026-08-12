@@ -156,6 +156,13 @@ slightly:
   be stabilized.
 - Leaf boxes are expected **not to overlap**. If they do, containment is
   resolved first-match (see ROI assignment below).
+- A box may carry an optional **mask polygon** (`LeafRegion.mask_polygon`, drawn
+  in the leaf window or set with `Session.set_leaf_mask`): the outline of the
+  tissue to track inside it. Only pixels inside it enter the fit — the box is
+  still warped whole — so a box that unavoidably contains a neighbouring leaf or
+  a bright static background is not anchored by it. Draw it a couple of pixels
+  outside the tissue edge; the interpolation and the registration pyramid spread
+  a feature about that far past its own edge.
 - Whole-frame mode is equivalent to per-leaf mode with a single box covering the
   full frame.
 

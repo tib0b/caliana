@@ -20,7 +20,7 @@ from caliana.models import (
     ROIShape,
     RigidTransform,
 )
-from caliana.registration import map_point, segment_tissue
+from caliana.registration import map_point
 from caliana.roi import extract_trace_tracked, move_roi
 
 
@@ -95,17 +95,6 @@ def test_session_tracking_pipeline_whole_frame():
     assert s.provenance()["registration"]["motion_tracking"] is True
 
 
-def test_segment_tissue_finds_dark_low_texture_region():
-    """Dark blob on a bright noisy background -> mask selects the dark region."""
-    rng = np.random.default_rng(0)
-    img = 200 + 20 * rng.standard_normal((60, 60))            # bright, textured bg
-    img[20:40, 25:45] = 10.0                                  # dark tissue patch
-    mask = segment_tissue(img, dark=True)
-    assert mask[30, 35]                                       # inside the patch
-    assert not mask[5, 5]                                     # background
-    assert 0.05 < mask.mean() < 0.25                          # ~ the 0.11 patch fraction
-
-
 def test_real_frames_tracking_runs_end_to_end():
     """Smoke test on the extracted recording frames, if present."""
     import glob
@@ -122,9 +111,11 @@ def test_real_frames_tracking_runs_end_to_end():
     s.data = stack
     from caliana.timeline import Timeline
     s.timeline = Timeline(n_frames=len(stack))
-    # One generous leaf box over the lower-left leaf; mask-driven per-leaf tracking.
+    # One generous leaf box over the lower-left leaf, masked to a polygon well
+    # inside it: per-leaf tracking driven by that tissue only.
     s.add_leaf_region((300, 470, 40, 210), label="lower-left")
-    s.register(RegistrationMode.PER_LEAF, reference="mean", mask=True, apply=False)
+    s.set_leaf_mask(0, [(320, 60), (320, 190), (450, 190), (450, 60)])
+    s.register(RegistrationMode.PER_LEAF, reference="mean", apply=False)
     assert s.track_motion
     leaf = s.leaf_regions[0]
     assert len(leaf.transforms) == len(stack)
@@ -140,6 +131,5 @@ if __name__ == "__main__":
     test_move_polygon_translates_and_rotates_vertices()
     test_tracked_trace_is_flat_while_static_trace_decays()
     test_session_tracking_pipeline_whole_frame()
-    test_segment_tissue_finds_dark_low_texture_region()
     test_real_frames_tracking_runs_end_to_end()
     print("all tracking tests passed")

@@ -113,9 +113,16 @@ class LeafRegion:
 
     Draw boxes generously: tissue that drifts outside its box cannot be stabilized
     (such frames are flagged in ``low_confidence_frames``).
+
+    ``mask_polygon`` is the optional hand-drawn outline of the tissue to track
+    inside the box (``(y, x)`` vertices, in the same full-frame pixel coordinates
+    as ``bbox``). Only pixels inside it take part in the motion estimate — the box
+    is still warped whole — so a leaf can be tracked past a neighbouring leaf or a
+    bright static background sharing its box. ``None`` estimates on the whole box.
     """
     bbox: tuple[int, int, int, int]                       # (y0, y1, x0, x1)
     label: str = ""
+    mask_polygon: list[tuple[float, float]] | None = None  # (y, x) outline; None = whole box
     transforms: list[RigidTransform] = field(default_factory=list)   # one per frame
     reference: np.ndarray | None = None                # mean/first of the sub-stack
     low_confidence_frames: list[int] = field(default_factory=list)   # drift-out flag
