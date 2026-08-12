@@ -26,6 +26,14 @@ QtCore, QtGui, QtWidgets = get_qt()
 _FILE_FILTER = "Recordings (*.tif *.tiff *.nd2);;TIFF (*.tif *.tiff);;Nikon ND2 (*.nd2);;All files (*)"
 
 
+def _compact_form(box) -> "QtWidgets.QFormLayout":
+    """A form layout inside ``box``, tightened to keep the panel narrow."""
+    form = QtWidgets.QFormLayout(box)
+    form.setContentsMargins(8, 6, 8, 6)
+    form.setSpacing(4)
+    return form
+
+
 class SourceWidget(QtWidgets.QWidget):
     """File picker + import parameters + calibration, feeding ``Session.load``."""
 
@@ -51,6 +59,10 @@ class SourceWidget(QtWidgets.QWidget):
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        # Compact: this panel sits next to the preview in the app, and every
+        # pixel it does not take is one the movie/heatmap get.
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
         # File row.
         file_row = QtWidgets.QHBoxLayout()
@@ -79,12 +91,13 @@ class SourceWidget(QtWidgets.QWidget):
     def _build_import_box(self) -> "QtWidgets.QWidget":
         """The six ImportParams fields (SPEC §3 Stage I, "downsample on load")."""
         box = QtWidgets.QGroupBox("Import (applied on load)")
-        form = QtWidgets.QFormLayout(box)
+        form = _compact_form(box)
 
         frames = QtWidgets.QHBoxLayout()
+        frames.setSpacing(4)
         self.start_box = QtWidgets.QSpinBox()
         self.start_box.setRange(0, 10_000_000)
-        self.start_box.setToolTip("First frame kept")
+        self.start_box.setToolTip("First frame kept (the window is [start, end))")
         frames.addWidget(self.start_box)
         frames.addWidget(QtWidgets.QLabel("to"))
         self.end_box = QtWidgets.QSpinBox()
@@ -95,7 +108,7 @@ class SourceWidget(QtWidgets.QWidget):
         self.end_box.setSpecialValueText("(end)")
         self.end_box.setToolTip("Last frame kept, exclusive; (end) reads to the last frame")
         frames.addWidget(self.end_box)
-        form.addRow("Frames [start, end):", frames)
+        form.addRow("Frames:", frames)
 
         self.tstep_box = QtWidgets.QSpinBox()
         self.tstep_box.setRange(1, 1000)
@@ -107,18 +120,22 @@ class SourceWidget(QtWidgets.QWidget):
         self.sstep_box.setToolTip("Keep every Nth pixel along Y and X (1 = full resolution)")
         form.addRow("Spatial step:", self.sstep_box)
 
-        self.window_check = QtWidgets.QCheckBox("Crop field of view (y0, y1, x0, x1)")
+        self.window_check = QtWidgets.QCheckBox("Crop field of view")
         self.window_check.setToolTip("Keep only a Y/X region, in the file's pixel coordinates")
         self.window_check.toggled.connect(self._on_window_toggled)
         form.addRow(self.window_check)
 
         window = QtWidgets.QHBoxLayout()
+        window.setSpacing(4)
         self.window_boxes = []
         for name in ("y0", "y1", "x0", "x1"):
             spin = QtWidgets.QSpinBox()
             spin.setRange(0, 10_000_000)
             spin.setPrefix(f"{name} ")
             spin.setEnabled(False)
+            # Four spinboxes on one row are what sets this panel's minimum
+            # width; the 7-digit range they accept is never typed in full.
+            spin.setMaximumWidth(68)
             self.window_boxes.append(spin)
             window.addWidget(spin)
         form.addRow(window)
@@ -133,8 +150,8 @@ class SourceWidget(QtWidgets.QWidget):
 
     def _build_scale_box(self) -> "QtWidgets.QWidget":
         """Time and space calibration of the *loaded* stack (SPEC §3, Units)."""
-        box = QtWidgets.QGroupBox("Calibration (read from the file when declared)")
-        form = QtWidgets.QFormLayout(box)
+        box = QtWidgets.QGroupBox("Calibration (from the file when declared)")
+        form = _compact_form(box)
 
         self.interval_box = QtWidgets.QDoubleSpinBox()
         self.interval_box.setRange(0.0, 1e6)

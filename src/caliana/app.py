@@ -81,7 +81,11 @@ class MainWindow(QtWidgets.QMainWindow):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self.source_panel)
         split.addWidget(self.preview_panel)
-        split.setSizes([420, 760])
+        # The parameters are fixed-size controls; the preview is what benefits
+        # from a wider window, so extra width goes entirely to it.
+        split.setSizes([320, 980])
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
 
         self.registration_panel = RegistrationWidget(self.session)
         self.roi_panel = RoiSelectionWidget(self.session)

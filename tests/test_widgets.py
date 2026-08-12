@@ -72,11 +72,10 @@ def test_import_preview_widget():
     assert w.movie.image is not None
     assert w.heatmap.image.shape == s.data.shape[1:]
 
-    # Playback controls drive without error.
-    w.play_btn.setChecked(True)
-    w.play_btn.setChecked(False)
-    w._on_time_changed(3, 0.0)
-    assert "frame 3" in w.frame_label.text()
+    # Scrubbing only: no playback controls, and the time slider still moves.
+    assert not hasattr(w, "play_btn")
+    w.movie.setCurrentIndex(3)
+    assert w.movie.currentIndex == 3
 
     w.close()
     print("import preview widget OK")

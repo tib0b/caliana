@@ -22,10 +22,15 @@ def test_spine():
     assert s.data is not None and s.data.ndim == 3
     T = len(s.data)
 
-    # Max-projection heatmap is normalized to [0, 1] (SPEC §3 Stage I).
+    # Max-projection heatmap is each pixel's largest ΔF/F₀, F₀ being the first
+    # frame (SPEC §3 Stage I), so it is finite and never below the first frame's
+    # own value of 0.
     mip = s.max_projection()
     assert mip.shape == s.data.shape[1:]
-    assert 0.0 <= float(mip.min()) and float(mip.max()) <= 1.0 + 1e-6
+    assert np.isfinite(mip).all() and float(mip.min()) >= 0.0
+    f0 = s.data[0].astype(float)
+    assert (f0 > 0).all()        # no dark pixels here, so F₀ needs no guarding
+    assert np.allclose(mip, s.data.max(axis=0) / f0 - 1.0, atol=1e-6)
 
     # Place a couple of ROIs and extract traces.
     h, w = s.data.shape[1:]

@@ -107,13 +107,13 @@ wrapper or the app shell.
   guessing at units, and a metadata failure never fails the load.
 
 **Visualization (Stage I widget)**
-- **Frame scrubbing + playback:** time slider plus a play button to watch the
-  movie.
+- **Frame scrubbing:** a time slider to step through the movie. No playback —
+  the slider is a scrubber only.
 - **Contrast / colormap controls:** adjustable display min/max and selectable
   colormap (raw Ca²⁺ signals are low-contrast).
 - **Max-intensity heatmap:** a per-pixel projection over time (max projection),
-  **normalized**, shown alongside the movie to reveal active regions before ROI
-  placement.
+  **normalized** against the first frame — each pixel's largest ΔF/F₀ — shown
+  alongside the movie to reveal active regions before ROI placement.
 
 ### Stage II — Registration (optional) & ROI selection
 

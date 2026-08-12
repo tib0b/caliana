@@ -156,11 +156,16 @@ class Session:
         return run_widget_blocking(lambda: ImportPreviewWidget(self))
 
     def max_projection(self) -> np.ndarray:
-        """Per-pixel max-over-time image of the normalized intensity of the working stack."""
+        """Per-pixel largest ΔF/F₀ over time of the working stack. SPEC.md §3 Stage I.
+
+        Normalizing the max projection against the first frame (F₀) is what makes
+        active tissue stand out from merely bright tissue — a dim pixel that
+        doubles reads higher than a bright one that never moves.
+        """
         self._require_data()
         mip = self._working_stack().max(axis=0).astype(float)
         f0 = self._working_stack()[0].astype(float)
-        return (mip - f0) / f0
+        return (mip - f0) / (f0 + 1e-12) # avoid division by 0
 
     # ---------------------------------------------------------------- Stage II
     def add_leaf_region(self, bbox, label: str = "") -> LeafRegion:

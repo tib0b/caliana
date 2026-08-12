@@ -1,12 +1,13 @@
 """Stage I — import & preview widget. SPEC.md §3 Stage I.
 
 Provides:
-- frame scrubbing + playback of the (stabilized, if registered) movie,
+- frame scrubbing of the (stabilized, if registered) movie,
 - contrast / colormap controls (pyqtgraph's histogram LUT),
-- a side-by-side normalized max-intensity heatmap.
+- a normalized max-intensity heatmap beside the movie.
 
-Built on pyqtgraph's ImageView, which supplies the time slider, play(), and the
-contrast/colormap histogram out of the box.
+Built on pyqtgraph's ImageView, which supplies the time slider and the
+contrast/colormap histogram out of the box. Playback is deliberately not
+offered: the time slider is a scrubber only.
 """
 from __future__ import annotations
 
@@ -23,9 +24,32 @@ QtCore, QtGui, QtWidgets = get_qt()
 # legacy [x, y]. Set once at import; harmless if set repeatedly.
 pg.setConfigOption("imageAxisOrder", "row-major")
 
+# Width of the contrast (histogram LUT) strip beside each image, in px.
+_HISTOGRAM_WIDTH = 58
+
+
+class _ScrubImageView(pg.ImageView):
+    """ImageView with playback disabled — the time slider only scrubs.
+
+    pyqtgraph binds the space bar to play/pause; swallowing it (and its release)
+    leaves scrubbing and arrow-key frame stepping intact.
+    """
+
+    def keyPressEvent(self, ev):
+        if ev.key() == QtCore.Qt.Key_Space:
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def keyReleaseEvent(self, ev):
+        if ev.key() == QtCore.Qt.Key_Space:
+            ev.accept()
+            return
+        super().keyReleaseEvent(ev)
+
 
 class ImportPreviewWidget(QtWidgets.QWidget):
-    """Scrub/playback + contrast + max-projection preview of a Session's stack."""
+    """Scrub + contrast + max-projection preview of a Session's stack."""
 
     closed = QtCore.Signal()
 
@@ -46,8 +70,8 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         layout.addWidget(split, stretch=1)
 
         # Movie: ImageView gives the time slider, scrubbing and contrast.
-        self.movie = pg.ImageView(name="movie")
-        split.addWidget(self._titled("Movie (scrub / play)", self.movie))
+        self.movie = _ScrubImageView(name="movie")
+        split.addWidget(self._titled("Movie (scrub)", self.movie))
 
         # Heatmap: 2D ImageView (no time axis), fixed inferno colormap.
         self.heatmap = pg.ImageView(name="heatmap")
@@ -64,30 +88,21 @@ class ImportPreviewWidget(QtWidgets.QWidget):
 
         # Simplify contrast: keep the level region for brightness/contrast, but
         # drop the colormap gradient editor and the ROI/menu buttons (clutter).
+        # With the gradient gone the histogram only needs room for its curve and
+        # tick labels, so it is narrowed to leave the images the width they earn
+        # (pyqtgraph's defaults — 95 px widget, 45 px plot — are sized for the
+        # gradient editor we just hid).
         for iv in (self.movie, self.heatmap):
             iv.ui.roiBtn.hide()
             iv.ui.menuBtn.hide()
             iv.ui.histogram.gradient.hide()
+            hist = iv.ui.histogram
+            hist.setMinimumWidth(0)
+            hist.setFixedWidth(_HISTOGRAM_WIDTH)
+            hist.item.vb.setMinimumWidth(0)
+            hist.item.vb.setMaximumWidth(16)
 
-        # Playback controls.
         controls = QtWidgets.QHBoxLayout()
-        self.play_btn = QtWidgets.QPushButton("Play")
-        self.play_btn.setCheckable(True)
-        self.play_btn.toggled.connect(self._on_play_toggled)
-        controls.addWidget(self.play_btn)
-
-        controls.addWidget(QtWidgets.QLabel("fps:"))
-        self.fps = QtWidgets.QSpinBox()
-        self.fps.setRange(1, 120)
-        self.fps.setValue(10)
-        self.fps.valueChanged.connect(self._on_fps_changed)
-        controls.addWidget(self.fps)
-
-        self.frame_label = QtWidgets.QLabel("frame 0")
-        controls.addWidget(self.frame_label)
-        # Connected once here, not in reload(): the ImageView outlives every
-        # reload, so re-connecting there would stack duplicate slots.
-        self.movie.sigTimeChanged.connect(self._on_time_changed)
         controls.addStretch(1)
         self.status = QtWidgets.QLabel("")
         controls.addWidget(self.status)
@@ -109,7 +124,6 @@ class ImportPreviewWidget(QtWidgets.QWidget):
         changed (a file opened, or re-imported at another downsampling); in a
         notebook it runs once, from ``__init__``.
         """
-        self.play_btn.setChecked(False)          # a stale stack must stop playing
         if self.session.data is None:
             self.movie.setImage(np.zeros((1, 1, 1)))
             self.heatmap.setImage(np.zeros((1, 1)))
@@ -153,18 +167,6 @@ class ImportPreviewWidget(QtWidgets.QWidget):
                            status=self.status)
 
     # ------------------------------------------------------------ signals
-    def _on_play_toggled(self, playing):
-        self.play_btn.setText("Pause" if playing else "Play")
-        self.movie.play(self.fps.value() if playing else 0)
-
-    def _on_fps_changed(self, value):
-        if self.play_btn.isChecked():
-            self.movie.play(value)
-
-    def _on_time_changed(self, index, _time):
-        self.frame_label.setText(f"frame {int(index)}")
-
     def closeEvent(self, event):
-        self.movie.play(0)
         self.closed.emit()
         super().closeEvent(event)
