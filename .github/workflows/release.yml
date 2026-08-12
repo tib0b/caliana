@@ -52,12 +52,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `smoke` marks the rows whose wheel the runner can actually execute.
+        # Both macOS runners are arm64 — the Intel wheel is cross-compiled there,
+        # exactly like the aarch64 Linux one — so those two can be built but not
+        # run, and pip would refuse to install them on the wrong architecture.
         include:
-          - { os: ubuntu-latest,  target: x86_64, manylinux: auto }
-          - { os: ubuntu-latest,  target: aarch64, manylinux: auto }
-          - { os: macos-14,       target: aarch64 }   # Apple Silicon
-          - { os: macos-13,       target: x86_64 }    # Intel
-          - { os: windows-latest, target: x64 }
+          - { os: ubuntu-latest,  target: x86_64,  manylinux: auto, smoke: true }
+          - { os: ubuntu-latest,  target: aarch64, manylinux: auto, smoke: false }
+          - { os: macos-15,       target: aarch64, smoke: true }   # Apple Silicon
+          - { os: macos-15,       target: x86_64,  smoke: false }  # Intel, cross-built
+          - { os: windows-latest, target: x64,     smoke: true }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -82,9 +86,7 @@ jobs:
           # wheels that fault on older CPUs, and pass every test on ours.
 
       - name: Smoke-test the wheel
-        # Only where the runner can execute what was just built: the aarch64
-        # Linux wheels are cross-compiled, so there is no native host for them.
-        if: matrix.target != 'aarch64' || startsWith(matrix.os, 'macos')
+        if: matrix.smoke
         shell: bash
         run: |
           # The wheel by path, not `--find-links dist --no-index caliana`: the
