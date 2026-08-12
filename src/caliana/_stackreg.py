@@ -1,7 +1,8 @@
 """Stack registration on the ``crabstack`` backend.
 
-``crabstack`` is a Rust registration backend built for this package, and exposes
-the same two native primitives pystackreg's C++ extension did —
+``crabstack`` is a Rust registration backend built for this package — it lives in
+``crabstack-rs/`` and is compiled into the wheel as ``caliana._crabstack``. It
+exposes the same two native primitives pystackreg's C++ extension did —
 ``_register(ref, mov, model)`` and ``_transform(mov, matrix)`` — but no
 orchestration around them. So the loop that used to come from
 ``pystackreg.StackReg`` lives here: register every frame against the chosen
@@ -16,22 +17,14 @@ unlike pystackreg there is no axis guessing and so no axis warning to silence.
 ``_register`` also takes optional per-frame masks, which pystackreg never
 exposed: see ``StackReg.register``.
 
-``crabstack`` is imported at module level, but this module is itself imported
+The extension is imported at module level, but this module is itself imported
 lazily from ``registration``, so ``import caliana`` still does not pull it in.
 """
 from __future__ import annotations
 
 import numpy as np
 
-try:
-    import crabstack
-except ModuleNotFoundError as exc:   # not on PyPI, so pip cannot have pulled it in
-    raise ModuleNotFoundError(
-        "Registration needs `crabstack`, which is not installed. Build it from a "
-        "checkout of the crabstack-rs crate:\n"
-        "    pip install maturin\n"
-        "    cd crabstack-rs && maturin develop --release"
-    ) from exc
+from . import _crabstack as crabstack
 
 
 def _as_f64(a) -> np.ndarray:
@@ -78,9 +71,9 @@ class StackReg:
         keep it, so masking one side is enough to drop it. Cut masks a couple of
         pixels wider than whatever you are excluding — the spline interpolation
         and the pyramid spread a feature about that far past its own edge.
-        Unlike ``registration._silhouette_stack``, which replaces the intensities
-        outright, this leaves the real intensities in place and only narrows
-        which of them are compared.
+        The real intensities are left in place; a mask only narrows which of them
+        are compared (this is what ``registration.leaf_mask`` feeds, from the
+        outline drawn inside a leaf box).
         """
         ref, mov = _as_f64(ref), _as_f64(mov)
         if ref.shape != mov.shape:

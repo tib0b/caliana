@@ -1,9 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "caliana"
+version = "0.3.0"
 description = "Analysis of plant calcium imaging data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -11,13 +12,27 @@ license = "MIT"
 license-files = [
     "LICENSE",
 ]
-dynamic = ["version"]
+authors = [
+    { name = "Thibaud Drouhard" },
+]
+keywords = ["calcium imaging", "microscopy", "image registration", "plant biology"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
+]
+
 dependencies = [
     "numpy",
     "scipy",
     "tifffile",
-    # Registration (SPEC §3 Stage II) runs on `crabstack`, which is not on PyPI
-    # and so cannot be listed here — install it separately, see README ▸ Install.
+    # Registration (SPEC §3 Stage II) runs on the crabstack Rust extension, built
+    # from `crabstack-rs/` into this package as `caliana._crabstack` — part of the
+    # wheel, so there is nothing to install separately.
     # Stage I .nd2 loading (lazy, dask-backed; xarray gives named dims)
     "nd2",
     "dask",
@@ -33,12 +48,20 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 
+[project.urls]
+Homepage = "https://github.com/tib0b/caliana"
+Repository = "https://github.com/tib0b/caliana"
+Issues = "https://github.com/tib0b/caliana/issues"
+
 [project.scripts]
 caliana = "caliana.app:main"
 
-[tool.setuptools.dynamic]
-version = {attr = "caliana.__version__"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["caliana*"]
+# The package is a mixed Rust/Python project: the Python sources under src/ are
+# the package, and the crabstack crate is compiled into it as a submodule.
+# `maturin develop` puts the built extension next to the Python sources, so an
+# editable checkout and an installed wheel have the same layout.
+[tool.maturin]
+manifest-path = "crabstack-rs/Cargo.toml"
+python-source = "src"
+module-name = "caliana._crabstack"
+features = ["python"]
