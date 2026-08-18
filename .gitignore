@@ -22,3 +22,7 @@ dist/
 # Rust build artefacts are covered by crabstack-rs/.gitignore.
 src/caliana/_crabstack*.so
 src/caliana/_crabstack*.pyd
+
+# virtual environments
+.venv/
+venv/
